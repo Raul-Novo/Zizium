@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "dependencies": [
+    {
+      "name": "limine",
+      "version": "12.5.2",
+      "url": "https://github.com/Limine-Bootloader/Limine/releases/download/v12.5.2/limine-binary.zip",
+      "sha256": "a4b4539e4229c25f5ceba93ada8a71b8a2c57d7b7900ea5f86c588e1b7afe621",
+      "licence": "BSD-2-Clause"
+    },
+    {
+      "name": "limine-protocol",
+      "version": "630686a3dd3ce40f9e510a7dd9fea6b4c60d952e",
+      "url": "https://raw.githubusercontent.com/Limine-Bootloader/limine-protocol/630686a3dd3ce40f9e510a7dd9fea6b4c60d952e/include/limine.h",
+      "sha256": "4de542d1c232b230ca4af04c5b89a78f51c9bdacb928a94ac44fc88377208a63",
+      "licence": "0BSD"
+    },
+    {
+      "name": "spleen",
+      "version": "2.2.0",
+      "url": "https://github.com/fcambus/spleen/releases/download/2.2.0/spleen-2.2.0.tar.gz",
+      "sha256": "ec42925c6b56d2138c862b2f97147c872e472f674bf03423417d827a08d69a89",
+      "licence": "BSD-2-Clause"
+    },
+    {
+      "name": "unicode-ucd",
+      "version": "17.0.0",
+      "url": "https://www.unicode.org/Public/17.0.0/ucd/UCD.zip",
+      "sha256": "2066d1909b2ea93916ce092da1c0ee4808ea3ef8407c94b4f14f5b7eb263d28e",
+      "licence": "Unicode-DFS-2016"
+    }
+  ]
+}

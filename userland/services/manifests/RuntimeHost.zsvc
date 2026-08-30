@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=RuntimeHost
+Executable=C:\Zizium\System\RuntimeHost.exe
+ServiceKind=System
+Identity=NID:SERVICE:RuntimeHost
+StartMode=Demand
+StartOrder=50
+Dependencies=SecurityHost,LogHost
+RestartPolicy=OnFailure
+TokenPolicy=Service
+MaximumRestarts=1
+Permissions=RuntimeBroker
+Log=C:\Zizium\Logs\System\RuntimeHost.log
+Status=Scaffolded

@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=UpdateHost
+Executable=C:\Zizium\System\UpdateHost.exe
+ServiceKind=System
+Identity=NID:SERVICE:UpdateHost
+StartMode=Automatic
+StartOrder=41
+Dependencies=PackageHost,NetworkHost,SecurityHost
+RestartPolicy=OnFailure
+TokenPolicy=Service
+MaximumRestarts=1
+Permissions=SystemUpdate
+Log=C:\Zizium\Logs\System\UpdateHost.log
+Status=Scaffolded

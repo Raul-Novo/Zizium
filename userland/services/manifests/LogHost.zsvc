@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=LogHost
+Executable=C:\Zizium\System\LogHost.exe
+ServiceKind=System
+Identity=NID:SERVICE:LogHost
+StartMode=Boot
+StartOrder=3
+Dependencies=ServiceHost
+RestartPolicy=OnFailure
+TokenPolicy=Service
+MaximumRestarts=2
+Permissions=SystemLogging
+Log=C:\Zizium\Logs\System\LogHost.log
+Status=Implemented

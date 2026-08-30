@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=PackageHost
+Executable=C:\Zizium\System\PackageHost.exe
+ServiceKind=System
+Identity=NID:SERVICE:PackageHost
+StartMode=Automatic
+StartOrder=40
+Dependencies=SecurityHost,MountHost,LogHost
+RestartPolicy=OnFailure
+TokenPolicy=Service
+MaximumRestarts=1
+Permissions=PackageManagement
+Log=C:\Zizium\Logs\System\PackageHost.log
+Status=Scaffolded

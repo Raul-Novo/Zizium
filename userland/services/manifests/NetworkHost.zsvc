@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=NetworkHost
+Executable=C:\Zizium\System\NetworkHost.exe
+ServiceKind=System
+Identity=NID:SERVICE:NetworkHost
+StartMode=Automatic
+StartOrder=30
+Dependencies=SecurityHost,LogHost
+RestartPolicy=OnFailure
+TokenPolicy=Service
+MaximumRestarts=1
+Permissions=NetworkStack
+Log=C:\Zizium\Logs\System\NetworkHost.log
+Status=Scaffolded

@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Build output and downloaded third-party dependencies
+/build/
+/external/deps/
+/.cache/
+
+# Local IDE/editor state
+/.vs/
+/.vscode/
+
+# Generated development files
+/compile_commands.json
+
+# Personal / internal project notes
+/AGENTS.md
+/c_style.md
+/ZIZIUM_PLAN.md
+/ZIZIUM_PROGRESS.md
+
+# Compiler/debug artefacts
+*.obj
+*.o
+*.pdb
+*.ilk
+*.log
+*.tmp
+
+# Python cache
+__pycache__/
+*.pyc

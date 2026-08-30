@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# clang-format 17+
+# Autoridad para el formato de C. También produce un formato razonable en C++,
+# pero GUIA_ESTILO_C.md no define una política de C++.
+
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++17
+
+# Anchura e indentación.
+ColumnLimit: 100
+IndentWidth: 2
+ContinuationIndentWidth: 4
+TabWidth: 2
+UseTab: Never
+
+# Llaves attach/K&R moderno. Las llaves obligatorias se validan con clang-tidy.
+BreakBeforeBraces: Attach
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: Empty
+AllowShortLoopsOnASingleLine: false
+InsertBraces: false
+RemoveBracesLLVM: false
+
+# Punteros y qualifiers.
+DerivePointerAlignment: false
+PointerAlignment: Left
+ReferenceAlignment: Left
+QualifierAlignment: Leave
+
+# Control flow y preprocesador.
+IndentCaseLabels: true
+IndentCaseBlocks: false
+IndentGotoLabels: false
+IndentPPDirectives: None
+NamespaceIndentation: None
+SpaceBeforeParens: ControlStatements
+
+# Espacios.
+SpaceAfterCStyleCast: false
+SpaceAfterLogicalNot: false
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCaseColon: false
+SpaceBeforeSquareBrackets: false
+SpaceInEmptyBlock: false
+SpaceInEmptyParentheses: false
+SpacesBeforeTrailingComments: 2
+SpacesInAngles: Never
+SpacesInCStyleCastParentheses: false
+SpacesInContainerLiterals: false
+SpacesInLineCommentPrefix:
+  Minimum: 1
+  Maximum: 1
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# No alinear comentarios finales: así quedan exactamente a dos espacios del código.
+AlignTrailingComments: false
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignConsecutiveMacros: false
+AlignEscapedNewlines: Right
+AlignOperands: Align
+
+# Wrapping determinista y fácil de revisar.
+BinPackArguments: false
+BinPackParameters: false
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+BreakStringLiterals: true
+
+# Líneas vacías y comentarios.
+MaxEmptyLinesToKeep: 1
+KeepEmptyLinesAtTheStartOfBlocks: false
+ReflowComments: false
+CommentPragmas: '^(TODO|FIXME|HACK|SAFETY|PERF|NOTE|DEPRECATED|NOLINT|clang-format|IWYU pragma)'
+
+# Includes: cabecera principal, C estándar, SDK/sistema/terceros, proyecto.
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<(assert|complex|ctype|errno|fenv|float|inttypes|iso646|limits|locale|math|setjmp|signal|stdalign|stdarg|stdatomic|stdbool|stddef|stdint|stdio|stdlib|stdnoreturn|string|tgmath|threads|time|uchar|wchar|wctype)\.h>$'
+    Priority: 1
+    SortPriority: 1
+    CaseSensitive: true
+  - Regex: '^<.*>$'
+    Priority: 2
+    SortPriority: 2
+    CaseSensitive: true
+  - Regex: '^".*"$'
+    Priority: 3
+    SortPriority: 3
+    CaseSensitive: true
+  - Regex: '.*'
+    Priority: 999
+    SortPriority: 999
+    CaseSensitive: true
+IncludeIsMainRegex: '$'
+
+# Mantener el fichero estable.
+DeriveLineEnding: false
+LineEnding: LF
+InsertNewlineAtEOF: true
+RemoveSemicolon: false
+SeparateDefinitionBlocks: Leave

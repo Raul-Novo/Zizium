@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=SessionHost
+Executable=C:\Zizium\System\SessionHost.exe
+ServiceKind=System
+Identity=NID:SYSTEM
+StartMode=System
+StartOrder=10
+Dependencies=SecurityHost,LogHost,MountHost
+RestartPolicy=OnFailure
+TokenPolicy=SessionBootstrap
+MaximumRestarts=1
+Permissions=SessionManagement
+Log=C:\Zizium\Logs\System\SessionHost.log
+Status=Implemented

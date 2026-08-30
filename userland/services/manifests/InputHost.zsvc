@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=InputHost
+Executable=C:\Zizium\System\InputHost.exe
+ServiceKind=System
+Identity=NID:SERVICE:InputHost
+StartMode=System
+StartOrder=21
+Dependencies=SecurityHost,LogHost
+RestartPolicy=OnFailure
+TokenPolicy=Service
+MaximumRestarts=1
+Permissions=InputRouting
+Log=C:\Zizium\Logs\System\InputHost.log
+Status=Scaffolded

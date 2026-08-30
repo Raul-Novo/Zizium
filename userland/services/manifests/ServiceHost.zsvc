@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=ServiceHost
+Executable=C:\Zizium\System\ServiceHost.exe
+ServiceKind=System
+Identity=NID:SYSTEM
+StartMode=Boot
+StartOrder=1
+Dependencies=
+RestartPolicy=OnFailure
+TokenPolicy=System
+MaximumRestarts=2
+Permissions=ServiceManagement
+Log=C:\Zizium\Logs\System\ServiceHost.log
+Status=Implemented

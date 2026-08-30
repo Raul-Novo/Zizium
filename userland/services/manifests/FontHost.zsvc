@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=FontHost
+Executable=C:\Zizium\System\FontHost.exe
+ServiceKind=System
+Identity=NID:SERVICE:FontHost
+StartMode=System
+StartOrder=22
+Dependencies=DisplayHost,MountHost
+RestartPolicy=OnFailure
+TokenPolicy=Service
+MaximumRestarts=1
+Permissions=FontCatalogue
+Log=C:\Zizium\Logs\System\FontHost.log
+Status=Scaffolded

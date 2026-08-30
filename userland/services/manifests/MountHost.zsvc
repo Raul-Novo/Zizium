@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=MountHost
+Executable=C:\Zizium\System\MountHost.exe
+ServiceKind=System
+Identity=NID:SERVICE:MountHost
+StartMode=Boot
+StartOrder=4
+Dependencies=SecurityHost,LogHost
+RestartPolicy=OnFailure
+TokenPolicy=Service
+MaximumRestarts=1
+Permissions=VolumeMount,BlockDeviceRead
+Log=C:\Zizium\Logs\Boot\MountHost.log
+Status=Implemented

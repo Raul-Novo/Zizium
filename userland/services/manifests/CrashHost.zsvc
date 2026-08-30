@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=CrashHost
+Executable=C:\Zizium\System\CrashHost.exe
+ServiceKind=System
+Identity=NID:SERVICE:CrashHost
+StartMode=System
+StartOrder=5
+Dependencies=LogHost,MountHost
+RestartPolicy=OnFailure
+TokenPolicy=Service
+MaximumRestarts=1
+Permissions=CrashDumpWrite,SymbolRead
+Log=C:\Zizium\Logs\Crash\CrashHost.log
+Status=Scaffolded

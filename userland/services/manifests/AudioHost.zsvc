@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=AudioHost
+Executable=C:\Zizium\System\AudioHost.exe
+ServiceKind=System
+Identity=NID:SERVICE:AudioHost
+StartMode=Automatic
+StartOrder=31
+Dependencies=SecurityHost,LogHost
+RestartPolicy=OnFailure
+TokenPolicy=Service
+MaximumRestarts=1
+Permissions=AudioRouting
+Log=C:\Zizium\Logs\System\AudioHost.log
+Status=Scaffolded

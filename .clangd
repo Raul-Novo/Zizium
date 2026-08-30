@@ -1,0 +1,181 @@
+# .clangd
+#
+# Configuración genérica para proyectos C/C++.
+# El build real o compile_commands.json debe aportar:
+# - estándar del lenguaje;
+# - target;
+# - macros de plataforma;
+# - directorios de includes;
+# - opciones específicas del proyecto.
+
+CompileFlags:
+  CompilationDatabase: Ancestors
+
+  # Advertencias comunes compatibles con C y C++.
+  Add:
+    - -Wpedantic
+    - -Wshadow
+    - -Wconversion
+    - -Wsign-conversion
+    - -Wdouble-promotion
+    - -Wformat=2
+    - -Wundef
+    - -Wimplicit-fallthrough
+    - -Wcast-qual
+
+  # No conviertas todas las advertencias en errores dentro del editor.
+  Remove:
+    - -Werror
+    - /WX
+    - -Wdeclaration-after-statement
+
+Index:
+  Background: Build
+  StandardLibrary: true
+
+Style:
+  QuotedHeaders:
+    - '^(include|src|app|lib|kernel|drivers|arch|tests)/.*'
+    - '.*\.(h|hpp|hh|hxx)$'
+
+  AngledHeaders:
+    - '^C:/Program Files/.*'
+    - '^C:/Program Files \(x86\)/.*'
+    - '^C:/Windows Kits/.*'
+    - '^C:/msys64/.*'
+    - '^/usr/.*'
+    - '^(assert|complex|ctype|errno|fenv|float|inttypes|iso646|limits|locale|math|setjmp|signal|stdalign|stdarg|stdatomic|stdbool|stddef|stdint|stdio|stdlib|stdnoreturn|string|tgmath|threads|time|uchar|wchar|wctype)\.h$'
+    - '^(algorithm|array|atomic|bit|bitset|cassert|cctype|cerrno|cfenv|cfloat|charconv|chrono|cinttypes|climits|clocale|cmath|compare|complex|concepts|condition_variable|coroutine|csetjmp|csignal|cstdarg|cstddef|cstdint|cstdio|cstdlib|cstring|ctime|cuchar|cwchar|cwctype|deque|exception|execution|filesystem|format|forward_list|fstream|functional|future|initializer_list|iomanip|ios|iosfwd|iostream|istream|iterator|latch|limits|list|locale|map|memory|mutex|new|numeric|optional|ostream|queue|random|ranges|ratio|regex|scoped_allocator|semaphore|set|shared_mutex|span|sstream|stack|stdexcept|stop_token|streambuf|string|string_view|syncstream|system_error|thread|tuple|type_traits|typeindex|typeinfo|unordered_map|unordered_set|utility|valarray|variant|vector)$'
+
+Diagnostics:
+  UnusedIncludes: Strict
+  MissingIncludes: Strict
+
+  Includes:
+    AnalyzeAngledIncludes: false
+
+  ClangTidy:
+    FastCheckFilter: Strict
+
+    Add:
+      - bugprone-*
+      - performance-*
+      - portability-*
+      - readability-*
+
+    Remove:
+      - readability-magic-numbers
+      - readability-identifier-length
+      - modernize-use-trailing-return-type
+      - modernize-use-nodiscard
+
+Completion:
+  AllScopes: Yes
+  ArgumentLists: None
+  HeaderInsertion: IWYU
+  CodePatterns: None
+  MacroFilter: ExactPrefix
+
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true
+  Designators: true
+  BlockEnd: false
+  DefaultArguments: false
+  TypeNameLimit: 32
+
+Hover:
+  ShowAKA: true
+  MacroContentsLimit: 4096
+
+Documentation:
+  CommentFormat: Markdown
+
+---
+# Headers .h:
+# No se fuerza C ni C++; clangd heredará el comando del archivo que
+# realmente incluya el header.
+
+If:
+  PathMatch:
+    - '.*\.h$'
+
+CompileFlags:
+  Add:
+    - -Wno-empty-translation-unit
+    - -Wno-pragma-once-outside-header
+
+---
+# Opciones exclusivas de archivos fuente C.
+
+If:
+  PathMatch:
+    - '.*\.c$'
+
+CompileFlags:
+  Add:
+    - -Wstrict-prototypes
+    - -Wmissing-prototypes
+    - -Wmissing-declarations
+    - -Wold-style-definition
+    - -Wwrite-strings
+    - -Wvla
+
+Diagnostics:
+  ClangTidy:
+    Remove:
+      - modernize-*
+      - cppcoreguidelines-*
+      - hicpp-*
+
+---
+# Opciones exclusivas de archivos fuente C++.
+
+If:
+  PathMatch:
+    - '.*\.(cc|cpp|cxx|c\+\+)$'
+
+CompileFlags:
+  Add:
+    - -Wnon-virtual-dtor
+    - -Woverloaded-virtual
+    - -Wold-style-cast
+    - -Wzero-as-null-pointer-constant
+
+Diagnostics:
+  ClangTidy:
+    Add:
+      - cppcoreguidelines-*
+      - modernize-*
+      - performance-*
+      - bugprone-*
+
+    Remove:
+      - cppcoreguidelines-owning-memory
+      - cppcoreguidelines-pro-bounds-pointer-arithmetic
+      - cppcoreguidelines-pro-type-reinterpret-cast
+      - readability-magic-numbers
+      - modernize-use-trailing-return-type
+
+---
+# Objective-C.
+
+If:
+  PathMatch:
+    - '.*\.m$'
+
+CompileFlags:
+  Add:
+    - -Wno-objc-root-class
+
+---
+# Objective-C++.
+
+If:
+  PathMatch:
+    - '.*\.(mm|M)$'
+
+CompileFlags:
+  Add:
+    - -Wno-objc-root-class

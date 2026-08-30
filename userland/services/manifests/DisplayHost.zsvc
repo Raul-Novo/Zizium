@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=DisplayHost
+Executable=C:\Zizium\System\DisplayHost.exe
+ServiceKind=System
+Identity=NID:SERVICE:DisplayHost
+StartMode=System
+StartOrder=20
+Dependencies=MountHost,LogHost
+RestartPolicy=OnFailure
+TokenPolicy=Service
+MaximumRestarts=1
+Permissions=DisplayControl
+Log=C:\Zizium\Logs\System\DisplayHost.log
+Status=Scaffolded

@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# clang-tidy 18+
+# Configuración orientada a C17. El formato pertenece a .clang-format.
+
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  misc-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -cert-dcl16-c,
+  -clang-analyzer-alpha.*,
+  -clang-analyzer-osx.*,
+  -misc-no-recursion,
+  -portability-avoid-pragma-once,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-uppercase-literal-suffix
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '.*'
+SystemHeaders: false
+FormatStyle: file
+InheritParentConfig: true
+
+CheckOptions:
+  # Naming.
+  readability-identifier-naming.DefaultCase: lower_case
+  readability-identifier-naming.FunctionCase: lower_case
+  readability-identifier-naming.FunctionIgnoredRegexp: '^(Zi|Zx|Zk|ZiFs)[A-Z].*$'
+  readability-identifier-naming.ParameterCase: lower_case
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.LocalVariableCase: lower_case
+  readability-identifier-naming.MemberCase: lower_case
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.UnionCase: CamelCase
+  readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.TypedefCase: CamelCase
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
+  readability-identifier-naming.EnumConstantCase: UPPER_CASE
+  readability-identifier-naming.StaticVariableCase: lower_case
+  readability-identifier-naming.StaticVariablePrefix: s_
+  readability-identifier-naming.StaticVariableIgnoredRegexp: '^k_.*'
+  readability-identifier-naming.StaticConstantCase: lower_case
+  readability-identifier-naming.StaticConstantPrefix: k_
+  readability-identifier-naming.GlobalConstantCase: lower_case
+  readability-identifier-naming.GlobalConstantPrefix: k_
+  readability-identifier-naming.GlobalConstantIgnoredRegexp: '^(Zi|Zx|Zk|ZiFs)[A-Z].*$'
+  readability-identifier-naming.GlobalVariableIgnoredRegexp: '^(Zi|Zx|Zk|ZiFs)[A-Z].*$'
+
+  # Umbrales de revisión, no límites arquitectónicos absolutos.
+  readability-function-size.LineThreshold: '100'
+  readability-function-size.ParameterThreshold: '7'
+  readability-function-size.NestingThreshold: '4'
+  readability-braces-around-statements.ShortStatementLines: '0'
+
+  # No marcar como inseguras funciones estándar útiles como memcpy o printf.
+  # Se señalan únicamente APIs que el estándar del proyecto prohíbe o desaconseja.
+  bugprone-unsafe-functions.ReportDefaultFunctions: 'false'
+  bugprone-unsafe-functions.ReportMoreUnsafeFunctions: 'false'
+  bugprone-unsafe-functions.CustomFunctions: >-
+    ^gets$,fgets,> está prohibida porque no permite limitar la entrada;
+    ^strcpy$,strcpy_s,> use una copia acotada y compruebe el resultado;
+    ^strcat$,strcat_s,> use una concatenación acotada y compruebe el resultado;
+    ^sprintf$,snprintf,> use salida con tamaño explícito;
+    ^vsprintf$,vsnprintf,> use salida con tamaño explícito;
+    ^tmpnam$,GetTempFileNameW,> use una API que cree nombres temporales sin colisiones triviales;
+    ^atoi$,strtol,> use una conversión que permita detectar errores y rango;
+    ^atof$,strtod,> use una conversión que permita detectar errores y rango;
+    ^scanf$,,> prefiera fgets y un parser explícito y reserve scanf_s para entrada pequeña y acotada;
+    ^fscanf$,,> prefiera lectura acotada y un parser explícito;
+    ^sscanf$,,> prefiera un parser explícito o sscanf_s con tamaños y retornos comprobados;
+    ^strncpy$,,> su semántica de terminación es fácil de usar mal y se prefiere un helper acotado;
+    ^strncat$,,> su contrato de tamaño es fácil de usar mal y se prefiere un helper acotado;
+    ^strtok$,,> modifica la entrada y se prefiere un tokenizer explícito o strtok_s
+
+  # Windows SDK/UCRT puede producir ruido de include-cleaner por includes transitivos internos.
+  misc-include-cleaner.IgnoreHeaders: 'Windows\.h;Winsock2\.h;Ws2Tcpip\.h;.*[/\\](um|shared|ucrt|winrt)[/\\].*;corecrt.*\.h;vcruntime.*\.h'

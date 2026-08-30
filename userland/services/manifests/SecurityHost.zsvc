@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=SecurityHost
+Executable=C:\Zizium\System\SecurityHost.exe
+ServiceKind=System
+Identity=NID:SYSTEM
+StartMode=Boot
+StartOrder=2
+Dependencies=ServiceHost
+RestartPolicy=OnFailure
+TokenPolicy=System
+MaximumRestarts=2
+Permissions=SecurityPolicy,IdentityDatabase
+Log=C:\Zizium\Logs\Security\SecurityHost.log
+Status=Implemented

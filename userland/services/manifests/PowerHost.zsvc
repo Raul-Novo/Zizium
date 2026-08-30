@@ -1,0 +1,14 @@
+FormatVersion=1
+Name=PowerHost
+Executable=C:\Zizium\System\PowerHost.exe
+ServiceKind=System
+Identity=NID:SERVICE:PowerHost
+StartMode=System
+StartOrder=23
+Dependencies=SecurityHost,LogHost
+RestartPolicy=Always
+TokenPolicy=Service
+MaximumRestarts=2
+Permissions=PowerPolicy
+Log=C:\Zizium\Logs\System\PowerHost.log
+Status=Scaffolded
