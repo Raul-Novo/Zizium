@@ -70,10 +70,6 @@ Interfaces that merely set aside a future architecture.
 - an early, deliberately limited Luma command loop retained only for explicit
   Recovery is achieved through the bounded user-mode Luma slice, which is the standard boot interface.
 
-The exact verified state is given in [ZIZIUM_PROGRESS.md].
-The index of the documentation for the architecture and subsystem
-documents.
-
 ## Build
 
 The primary supported host is Windows 11 x64 with PowerShell 7, GNU Make,
