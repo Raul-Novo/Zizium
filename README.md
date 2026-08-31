@@ -109,3 +109,7 @@ Where it is natural, the English language and identifiers owned by the project u
 
 The work owned by Zizium is under GPL-3.0 or later, and third-party notices are recorded in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Pronunciation
+
+Many people say Zizium wrong; it is pronounced as "Caesium"
