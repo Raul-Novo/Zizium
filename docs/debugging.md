@@ -10,7 +10,10 @@ COM1 is initialised at boot and supports bounded polling input/output. The
 kernel log records severity, subsystem, message, and sequence in a fixed ring,
 mirrors text to serial and framebuffer, emits machine-checkable boot markers,
 and has a non-returning panic path. Reproducible links retain a PDB. `pecheck`
-inspects bounded PE metadata.
+inspects bounded PE metadata. `zifsinspect` reads raw ZiFS volumes or their GPT
+partition without write capability and reports redundant superblocks, journal
+headers and records, security descriptors, namespace/linkage, extents, and
+allocation accounting.
 
 All architectural exceptions enter one C frame contract. Fatal diagnostics
 switch to bounded serial-only output and include vector, error code, RIP, CS,
@@ -30,6 +33,15 @@ recovery. A dedicated negative gate injects a bounded controller timeout and a
 second corrupts both GPT header CRCs. Each must reject direct mounting, emit an
 exact reason marker, enter only the explicit recovery path, and still reach
 Luma without a panic.
+
+ZiFS inspection has three real checkpoints in `make zifs-test`: a clean
+post-create volume, a committed transaction stopped before checkpoint, and a
+clean grown file plus multi-block directory. The committed checkpoint is
+validated through a memory-only journal replay overlay and must report recovery
+required. Eleven host fixtures cover a valid ordinary volume, a valid
+formatter-created multi-block directory, redundant-copy degradation,
+checksums, namespace metadata, and allocation corruption; every fixture is
+hashed before and after inspection to enforce the read-only contract.
 
 ## Scaffolded
 

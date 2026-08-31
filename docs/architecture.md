@@ -44,17 +44,25 @@ UTF-8 byte sequences exactly.
   option requests it or an injected storage-failure test selects it.
 - Scalable ZiFS allocation maps, redundant version-one journal headers,
   full-block redo records, one bounded regular-file create operation with up
-  to 28 staged home-block images and 24 contiguous data blocks, plus atomic
-  exact-case no-replacement same-directory rename/cross-directory move,
-  shrink-only regular-file truncation, and regular-file deletion. Released
-  extents are validated globally and remain unavailable to a new valid writer
-  until checkpoint. The serial writer reserves one ring slot, wraps record
-  addressing, reclaims through each checkpoint, and automatically rolls back
-  or replays. Host tests cover every ordinary, wrapped, rename, move,
-  truncate, and delete write/flush boundary; twenty-five QEMU boots prove
-  persistence, both crash outcomes, durable security-descriptor enforcement,
-  and fail-closed rejection of a corrupted security table on the real
-  partition path.
+  to 28 staged home-block images and 24 contiguous data blocks, bounded
+  non-sparse overwrite/growth with up to 24 data blocks per request, plus
+  atomic exact-case no-replacement same-directory rename/cross-directory move,
+  shrink-only regular-file truncation, and regular-file deletion. The
+  directory-extents incompatible feature preserves each fixed directory block
+  as logical block 0 and maps up to 255 continuation blocks through inline
+  extents. Released extents are validated globally and remain unavailable to a
+  new valid writer until checkpoint. The serial writer reserves one ring slot,
+  wraps record addressing, reclaims through each checkpoint, and automatically
+  rolls back or replays. Host tests cover every relevant ordinary, wrapped,
+  write-growth, first-directory-expansion, rename, move, truncate, and delete
+  write/flush boundary; twenty-seven QEMU boots prove persistence, both crash
+  outcomes, multi-block directory lookup, durable security-descriptor
+  enforcement, and fail-closed rejection of a corrupted security table on the
+  real partition path.
+- A non-mutating host inspector for raw ZiFS volumes and GPT images validates
+  both redundant metadata copies, active journal state, the durable security
+  table, namespace and extent ownership, and allocation accounting. Committed
+  pre-checkpoint metadata is checked through a memory-only replay overlay.
 - A kernel-owned GDT, 64-bit TSS, dedicated catastrophic-exception IST stacks,
   a complete IDT, and a single 176-byte C interrupt-frame contract.
 - Bounded exception diagnostics with automated invalid-opcode, ordinary
@@ -123,11 +131,14 @@ UTF-8 byte sequences exactly.
   One nested child path is verified through ZIA/Zx; this is not concurrent
   process scheduling. Bootstrap tokens are trusted kernel policy inputs, not
   products of a logon service or durable identity database.
-- ZiFS mutation remains single-writer and bounded to one create with at most
-  24 contiguous data blocks, one no-replacement rename/move, one shrink-only
-  truncate, or one regular-file delete. Growth, directory deletion, durable ACL
-  records, multi-block directories, and general file I/O APIs are not
-  implemented.
+- ZiFS mutation remains single-writer and bounded to one create, one
+  non-sparse write/growth of at most 24 data blocks, one no-replacement
+  rename/move, one shrink-only truncate, or one regular-file delete.
+  Directories are limited to 256 blocks and four inline continuation extents;
+  directory deletion/reclamation, sparse writes, overflow extents, ACL
+  mutation/inheritance, clean unmount, repair tooling, and general file I/O
+  APIs are not implemented. Durable ACL records themselves are implemented and
+  checked at mount.
 
 ## Future
 

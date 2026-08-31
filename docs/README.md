@@ -2,7 +2,9 @@
 
 This index describes the current Zizium 0.2 "Luma" documentation set. Each subsystem
 document separates implemented behaviour from scaffolded interfaces and future
-work.
+work. Phases 0–6 are complete; Phase 7's bounded writable ZiFS slice includes
+file growth and multi-block directories but remains active pending clean
+unmount and repair policy/tooling.
 
 ## Foundations
 

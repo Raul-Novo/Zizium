@@ -86,19 +86,29 @@ barriers through the partition adapter and polling QEMU NVMe driver. ZiFS has
 scalable allocation maps, redundant version-one journal headers, full-block
 redo records, dirty/clean superblock generations, staged creation of one
 bounded regular file, exact-case no-replacement same-directory rename and
-cross-directory move, shrink-only regular-file truncation, regular-file
-deletion, ordered commit, and automatic single-transaction
-rollback/replay/repair. Caller-owned transaction workspaces provide 1–28
-home-block image slots; create accepts up to 24 contiguous data blocks. The
+cross-directory move, bounded non-sparse overwrite/growth, shrink-only
+regular-file truncation, regular-file deletion, ordered commit, and automatic
+single-transaction rollback/replay/redundancy repair. Caller-owned transaction
+workspaces provide 1–28 home-block image slots; create accepts up to 24
+contiguous data blocks and each write accepts at most 24 data blocks. The
 32-record journal reserves one slot, advances modulo its declared capacity,
 and reclaims the validated transaction cursor at checkpoint or recovery.
+
+Incompatible feature `ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1` freezes the
+multi-block directory contract. The directory-table block remains logical
+block 0; inline extents map logical blocks 1 onwards, `file_size` stays zero,
+and `allocated_size` counts only continuation bytes. Mount, exact-case lookup,
+transactions, the formatter, and the inspector validate all blocks, reject
+duplicates across blocks, and cap a directory at 256 blocks. Create and move
+allocate one continuation block atomically when every existing block is full.
 
 Rename/move validates directory ownership and complete directory blocks,
 rejects exact collisions, duplicate names, malformed entry-to-record linkage,
 and directory ancestry cycles, and preserves file identity, security reference,
 extents, and content. Case-only and canonically distinct names remain valid.
-Same-directory rename stages two home blocks; cross-directory move stages
-three and updates the moved record's parent and change time.
+The operation updates the moved record's parent/change time and each affected
+parent's modified/change times. A target-directory expansion may add its
+directory record, allocation map, and continuation block to the redo set.
 
 Truncate preserves file/security identity, updates size/timestamps, zeroes a
 partial retained tail, and releases only a globally validated suffix of inline
@@ -106,24 +116,39 @@ extents. Delete removes one exact regular-file entry, updates its parent,
 clears the record, and releases every validated inline extent. Released ranges
 remain only in staged bitmap images until commit; serial-writer generation and
 recovery gates prevent reuse before checkpoint and reject stale speculative
-transactions. Growth and directory deletion return
-`ZI_STATUS_NOT_IMPLEMENTED`.
+transactions. Write preserves identity, stages all touched blocks, prefers to
+extend the final physical extent, and may add another inline extent when that
+range is occupied. Offsets beyond end-of-file, sparse allocation, a fifth
+extent, and directory deletion remain unsupported.
 
 Host tests fail every one of the 29 write/flush operations in the original
 commit, all 23 in a wrapped transaction, all 23 in rename, all 25 in move, and
 all 25 in each truncate/delete transaction, requiring an exact old-or-new
 namespace, file-data, and allocation state after every restart. A successful
-27-image transaction proves all 24 data blocks. `make zifs-test` proves clean
-create, rename/move, truncate/delete persistence, both crash outcomes,
-slot-31-to-slot-0 wrap, post-wrap persistence, and checkpoint-delayed reuse
-across twenty-five real QEMU/EDK2 boots of writable NVMe image copies. The
-twenty-fifth boot corrupts a durable ACE on the direct partition, proves
-fail-closed rejection with `ZIFS_SECURITY_CORRUPTION_SAFE`, and uses only the
-explicit clean recovery module. The version-one `ZISD` region now stores
-checksummed owner/group/DACL/ACE data, mount validates every live reference,
-and normal boot exercises allow, deny, and default-deny policy. Phase 7 remains
-active because growth, multi-block directories, repair/inspection tooling,
-clean unmount, and its full exit criteria are absent.
+27-image transaction proves all 24 create data blocks. Separate exhaustive
+campaigns fail every write-growth operation and every operation in the first
+directory expansion, requiring exactly the old or new size/content, path,
+extent, allocation, and generation state after recovery. Host acceptance is
+now 33 groups and 2,923 assertions. `make zifs-test` proves clean create,
+write growth, multi-block directory persistence, rename/move, truncate/delete,
+both crash outcomes, slot-31-to-slot-0 wrap, post-wrap persistence, and
+checkpoint-delayed reuse across twenty-seven real QEMU/EDK2 boots of writable
+NVMe image copies. The final boot corrupts a durable ACE on the direct
+partition, proves fail-closed rejection with `ZIFS_SECURITY_CORRUPTION_SAFE`,
+and uses only the explicit clean recovery module. The version-one `ZISD`
+region stores checksummed owner/group/DACL/ACE data, mount validates every live
+reference, and normal boot exercises allow, deny, and default-deny policy.
+Phase 7 remains active because clean-unmount/flush semantics, bounded repair
+policy/tooling, and its complete exit criteria are not yet finished.
+
+The Windows-host `zifsinspect.exe` is now a real, strictly read-only inspector
+for raw volumes and frozen-GUID GPT images. It validates both superblocks and
+journal headers, committed in-flight journal state, security records, all live
+file and directory relationships, extents/cross-links, and allocation maps.
+Committed pre-checkpoint state is evaluated through a heap-owned replay overlay;
+the image is never repaired or recovered in place. Eleven fixtures (including
+a valid formatter-created multi-block directory) and three real QEMU
+checkpoints compare SHA-256 before and after inspection.
 
 The authoritative command results, image hashes, limitations, and exact file
 lists are in `ZIZIUM_PROGRESS.md`. Detailed contracts are in `memory.md`,
@@ -154,12 +179,12 @@ lists are in `ZIZIUM_PROGRESS.md`. Detailed contracts are in `memory.md`,
 Extend Phase 7 from its verified durable transaction and security-descriptor
 foundation in this dependency order:
 
-1. Add a read-only journal/metadata inspection tool and corruption fixtures
-   before any automatic repair policy is broadened.
-2. Add write growth and multi-block directories without an incompatible ZiFS
-   0.1 wire-format change.
-3. Define and verify clean-unmount/flush semantics before broadening writer
+1. Define and verify clean-unmount/flush semantics before broadening writer
    concurrency or repair policy.
+2. Specify a bounded repair policy which consumes inspector evidence without
+   converting unknown corruption into apparent success.
+3. Finish the remaining Phase 7 exit-criteria audit, including directory
+   deletion/reclamation only if the documented milestone requires it.
 
 Do not mark Phase 7 complete until create/write/read/rename/delete and security
 descriptors persist across reboot and all exit criteria pass. Do not introduce

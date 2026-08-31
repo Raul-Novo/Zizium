@@ -31,9 +31,11 @@ recovery path.
 Host tests cover exact translation, parent-boundary rejection, input-size
 checks, read-only enforcement, write failure propagation, and flush capability
 validation. The ZiFS crash gate exercises real NVMe writes and flushes under
-QEMU. ZiFS truncate/delete transactions carry released allocation bits only in
-journalled home-block images; the current single-writer/recovery gate prevents
-a new allocator from observing those blocks until checkpoint publication.
+QEMU. ZiFS create, write-growth, directory-expansion, rename/move,
+truncate/delete, and recovery paths all use the same block/flush contract.
+Released allocation bits exist only in journalled home-block images; the
+current single-writer/recovery gate prevents a new allocator from observing
+those blocks until checkpoint publication.
 
 ## Scaffolded
 

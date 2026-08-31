@@ -111,23 +111,28 @@ provided, explicitly logged recovery module, complete the user-session proof,
 and then reach the explicit early recovery shell without `PANIC`.
 
 `make zifs-test` uses writable copies of the real GPT/NVMe image across
-twenty-five boots. The first eight prove clean create/reboot, pre-commit
+twenty-seven boots. The first eight prove clean create/reboot, pre-commit
 rollback, post-commit replay, slot-31-to-slot-0 journal wrap, and post-wrap
-persistence. Six further boots case-only rename and then move the populated PE from
-`C:\Program Files\Zizium\Hello Seed.exe` to
-`C:\Temp\First Light Seed.exe`, verify a clean reboot, cut power on each side
-of the move commit boundary, and verify the required rollback or replay state.
-The kernel checks exact old/intermediate/new paths, parent linkage, record and
-security identity, extents, and PE bytes. Ten final boots perform clean
-shrink/delete plus reboot, then independently cut power before and after the
-truncate and delete commit boundaries and verify rollback/replay. They require
+persistence. The rename/move sequence case-only renames and then moves the
+populated PE from `C:\Program Files\Zizium\Hello Seed.exe` to
+`C:\Temp\First Light Seed.exe`, verifies a clean reboot, cuts power on each
+side of the move commit boundary, and verifies the required rollback or replay
+state. The kernel checks exact old/intermediate/new paths, parent linkage,
+record and security identity, extents, and PE bytes.
+
+Two additional boots create 18 long exact-case root names until the fixed
+directory block expands into an extent-backed continuation, grow
+`C:\Growth Seed.bin` from one byte to 10,000 bytes, inspect the resulting GPT
+metadata, and then re-read every path and byte after reboot. Ten truncate/delete
+boots perform the clean sequence plus reboot, then independently cut power
+before and after each commit boundary and verify rollback/replay. They require
 exact old/new bytes or presence, coherent allocation bits, tail zeroing, and
 reuse only after checkpoint. Internal test tokens, the acceptance-only
-three-block fixture, and the fault-injection block wrapper are not exposed as a
-normal filesystem API or included in the ordinary system image. A final boot
-corrupts an ACE byte in the direct partition's checksummed `ZISD` table. It
-must emit `ZIFS_SECURITY_CORRUPTION_SAFE`, must not emit `ZIFS_DIRECT`, and may
-complete only through the explicitly enabled, uncorrupted recovery module.
+fixtures, and the fault-injection block wrapper are not exposed as a normal
+filesystem API or included in the ordinary system image. A final boot corrupts
+an ACE byte in the direct partition's checksummed `ZISD` table. It must emit
+`ZIFS_SECURITY_CORRUPTION_SAFE`, must not emit `ZIFS_DIRECT`, and may complete
+only through the explicitly enabled, uncorrupted recovery module.
 
 ## Disk image
 
@@ -155,8 +160,9 @@ reboot. Each boot receives a fresh copied EDK2 variable store.
 
 The verified NVMe path is polling, single-controller, single-namespace, and
 uniprocessor. It is not a general storage/PnP implementation. ZiFS writing is a
-bounded single-writer create, no-replacement rename/move, shrink-only truncate,
-and regular-file delete slice, not a complete writable filesystem.
+bounded single-writer create/write/growth, extent-backed directory insertion,
+no-replacement rename/move, shrink-only truncate, and regular-file delete
+slice, not a complete writable filesystem.
 The EFI system table address remains reserved for later firmware services.
 Programme files are read eagerly rather than through file objects or demand
 paging. Process execution remains synchronous; only one nested parent/child

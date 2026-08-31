@@ -37,11 +37,34 @@ typedef struct RecordSummary {
   uint32_t present;
 } RecordSummary;
 
+typedef struct DirectoryNameSummary {
+  uint16_t size;
+  char data[ZI_FS_MAX_DIRECTORY_NAME_BYTES];
+} DirectoryNameSummary;
+
+typedef struct DirectoryInspection {
+  const ZiFsVolume* volume;
+  RecordSummary* records;
+  uint64_t record_capacity;
+  RecordSummary* directory;
+  DirectoryNameSummary* names;
+  size_t name_capacity;
+  size_t name_count;
+  ZiFsInspectReport* report;
+} DirectoryInspection;
+
 typedef struct JournalRecordSummary {
   ZiFsJournalRecord record;
   uint64_t record_index;
   unsigned char payload[ZI_FS_JOURNAL_MAXIMUM_PAYLOAD_SIZE];
 } JournalRecordSummary;
+
+typedef struct JournalReplayOverlay {
+  const ZiBlockDevice* parent;
+  uint64_t target_blocks[ZI_FS_JOURNAL_MAXIMUM_BLOCK_IMAGES];
+  unsigned char block_images[ZI_FS_JOURNAL_MAXIMUM_BLOCK_IMAGES][ZI_FS_BLOCK_SIZE];
+  uint32_t image_count;
+} JournalReplayOverlay;
 
 static ZiStatus inspect_superblocks(const ZiBlockDevice* device,
                                     void* block_buffer,
@@ -51,16 +74,20 @@ static ZiStatus inspect_superblocks(const ZiBlockDevice* device,
 static ZiStatus inspect_journal(const ZiFsVolume* volume,
                                 void* block_buffer,
                                 size_t block_buffer_size,
+                                JournalReplayOverlay* overlay,
                                 ZiFsInspectReport* report);
 static ZiStatus inspect_active_transaction(const ZiFsVolume* volume,
                                            const ZiFsJournalHeader* header,
                                            void* block_buffer,
                                            size_t block_buffer_size,
+                                           JournalReplayOverlay* overlay,
                                            ZiFsInspectReport* report);
 static ZiStatus inspect_security(const ZiFsVolume* volume,
                                  uint64_t* security_ids,
                                  size_t security_id_capacity,
                                  ZiFsInspectReport* report);
+static void
+inspect_home_metadata(const ZiFsVolume* volume, ZiFsInspectReport* report, ZiStatus* first_failure);
 static ZiStatus inspect_namespace(const ZiFsVolume* volume,
                                   const uint64_t* security_ids,
                                   size_t security_id_count,
@@ -77,12 +104,17 @@ static ZiStatus inspect_directories(const ZiFsVolume* volume,
                                     RecordSummary* records,
                                     uint64_t record_capacity,
                                     ZiFsInspectReport* report);
-static ZiStatus inspect_directory_entries(const ZiFsVolume* volume,
-                                          RecordSummary* records,
-                                          uint64_t record_capacity,
-                                          RecordSummary* directory,
-                                          void* block_buffer,
-                                          ZiFsInspectReport* report);
+static ZiStatus inspect_directory(const ZiFsVolume* volume,
+                                  RecordSummary* records,
+                                  uint64_t record_capacity,
+                                  RecordSummary* directory,
+                                  ZiFsInspectReport* report);
+static ZiStatus inspect_directory_blocks(DirectoryInspection* inspection, uint64_t block_count);
+static ZiStatus inspect_directory_entries(DirectoryInspection* inspection,
+                                          const void* block_buffer);
+static ZiStatus validate_directory_links(const ZiFsVolume* volume,
+                                         const RecordSummary* records,
+                                         uint64_t record_capacity);
 static ZiStatus inspect_allocation(const ZiFsVolume* volume,
                                    const unsigned char* expected_blocks,
                                    ZiFsInspectReport* report);
@@ -100,9 +132,17 @@ static bool bytes_are_zero(const void* data, size_t size);
 static int compare_u64(const void* left, const void* right);
 static bool journal_header_state_equal(const ZiFsJournalHeader* left,
                                        const ZiFsJournalHeader* right);
+static bool journal_target_is_valid(const ZiFsSuperblock* superblock, uint64_t target_block);
+static uint32_t finalise_transaction_checksum(uint32_t checksum);
+static ZiStatus replay_overlay_read_blocks(void* context,
+                                           uint64_t first_block,
+                                           uint32_t block_count,
+                                           void* output,
+                                           size_t output_size);
 static ZiStatus validate_journal_record_sequence(const JournalRecordSummary* records,
                                                  uint64_t record_count,
                                                  const ZiFsJournalHeader* header,
+                                                 JournalReplayOverlay* overlay,
                                                  ZiFsInspectReport* report);
 static void preserve_first_failure(ZiStatus candidate, ZiStatus* first_failure);
 
@@ -118,6 +158,9 @@ ZiStatus zifs_inspect_volume(const ZiBlockDevice* device, ZiFsInspectReport* out
   report.version = ZIFS_INSPECT_REPORT_VERSION;
   report.primary_superblock_status = ZI_STATUS_INVALID_STATE;
   report.backup_superblock_status = ZI_STATUS_INVALID_STATE;
+  for (size_t index = 0; index < ZI_FS_JOURNAL_HEADER_COPIES; ++index) {
+    report.journal_header_status[index] = ZI_STATUS_INVALID_STATE;
+  }
   report.mount_status = ZI_STATUS_INVALID_STATE;
   report.journal_status = ZI_STATUS_INVALID_STATE;
   report.security_status = ZI_STATUS_INVALID_STATE;
@@ -145,39 +188,30 @@ ZiStatus zifs_inspect_volume(const ZiBlockDevice* device, ZiFsInspectReport* out
     first_failure = ZI_STATUS_BUFFER_TOO_SMALL;
   }
 
-  report.journal_status = inspect_journal(&volume, block_buffer, sizeof block_buffer, &report);
+  JournalReplayOverlay* overlay = calloc(1, sizeof *overlay);
+  if (overlay == NULL) {
+    report.journal_status = ZI_STATUS_NO_MEMORY;
+  } else {
+    overlay->parent = &volume.device;
+    report.journal_status =
+        inspect_journal(&volume, block_buffer, sizeof block_buffer, overlay, &report);
+  }
   preserve_first_failure(report.journal_status, &first_failure);
 
-  uint64_t security_ids[ZI_FS_SECURITY_MAXIMUM_RECORDS] = {0};
-  report.security_status =
-      inspect_security(&volume, security_ids, ZI_FS_SECURITY_MAXIMUM_RECORDS, &report);
-  preserve_first_failure(report.security_status, &first_failure);
+  ZiFsVolume inspection_volume = volume;
+  ZiBlockDevice overlay_device = volume.device;
+  if (overlay != NULL && ZiSucceeded(report.journal_status) && overlay->image_count != 0) {
+    overlay_device.context = overlay;
+    overlay_device.read_blocks = replay_overlay_read_blocks;
+    overlay_device.write_blocks = NULL;
+    overlay_device.flush = NULL;
+    overlay_device.flags |= ZI_BLOCK_DEVICE_READ_ONLY;
+    inspection_volume.device = overlay_device;
+    report.inspected_replay_view = 1;
+  }
 
-  unsigned char* expected_blocks = NULL;
-  if (volume.superblock.total_blocks <= ZIFS_INSPECT_MAXIMUM_VOLUME_BLOCKS &&
-      ZiSucceeded(report.security_status)) {
-    expected_blocks = calloc((size_t)volume.superblock.total_blocks, 1);
-    if (expected_blocks == NULL) {
-      report.namespace_status = ZI_STATUS_NO_MEMORY;
-      preserve_first_failure(report.namespace_status, &first_failure);
-    }
-  }
-  if (expected_blocks != NULL) {
-    report.namespace_status = mark_metadata_blocks(&volume.superblock, expected_blocks);
-    if (ZiSucceeded(report.namespace_status)) {
-      report.namespace_status = inspect_namespace(&volume,
-                                                  security_ids,
-                                                  (size_t)report.security_descriptor_count,
-                                                  expected_blocks,
-                                                  &report);
-    }
-    preserve_first_failure(report.namespace_status, &first_failure);
-    if (ZiSucceeded(report.namespace_status)) {
-      report.allocation_status = inspect_allocation(&volume, expected_blocks, &report);
-      preserve_first_failure(report.allocation_status, &first_failure);
-    }
-    free(expected_blocks);
-  }
+  inspect_home_metadata(&inspection_volume, &report, &first_failure);
+  free(overlay);
 
   if (ZiSucceeded(first_failure) && report.needs_recovery != 0) {
     first_failure = ZI_STATUS_RECOVERY_REQUIRED;
@@ -232,6 +266,7 @@ static ZiStatus inspect_superblocks(const ZiBlockDevice* device,
 static ZiStatus inspect_journal(const ZiFsVolume* volume,
                                 void* block_buffer,
                                 size_t block_buffer_size,
+                                JournalReplayOverlay* overlay,
                                 ZiFsInspectReport* report) {
   uint64_t expected_capacity = 0;
   ZiStatus status =
@@ -241,32 +276,40 @@ static ZiStatus inspect_journal(const ZiFsVolume* volume,
   }
 
   ZiFsJournalHeader copies[ZI_FS_JOURNAL_HEADER_COPIES] = {0};
-  ZiStatus copy_status[ZI_FS_JOURNAL_HEADER_COPIES] = {0};
   for (uint32_t index = 0; index < ZI_FS_JOURNAL_HEADER_COPIES; ++index) {
-    copy_status[index] = volume->device.read_blocks(volume->device.context,
-                                                    volume->superblock.journal_start + index,
-                                                    1,
-                                                    block_buffer,
-                                                    block_buffer_size);
-    if (ZiSucceeded(copy_status[index])) {
-      copy_status[index] = ZiFsDecodeJournalHeader(block_buffer, ZI_FS_BLOCK_SIZE, &copies[index]);
+    report->journal_header_status[index] =
+        volume->device.read_blocks(volume->device.context,
+                                   volume->superblock.journal_start + index,
+                                   1,
+                                   block_buffer,
+                                   block_buffer_size);
+    if (ZiSucceeded(report->journal_header_status[index])) {
+      report->journal_header_status[index] =
+          ZiFsDecodeJournalHeader(block_buffer, ZI_FS_BLOCK_SIZE, &copies[index]);
+    }
+    if (ZiSucceeded(report->journal_header_status[index]) &&
+        copies[index].record_capacity != expected_capacity) {
+      report->journal_header_status[index] = ZI_STATUS_CORRUPT_FILESYSTEM;
     }
   }
 
-  status = ZiFsLoadJournalHeader(&volume->device,
-                                 volume->superblock.journal_start,
-                                 block_buffer,
-                                 block_buffer_size,
-                                 &report->journal,
-                                 &report->selected_journal_copy);
-  if (ZiFailed(status) || report->journal.record_capacity != expected_capacity) {
-    if (ZiFailed(status)) {
-      return status;
-    }
+  bool first_valid = ZiSucceeded(report->journal_header_status[0]);
+  bool second_valid = ZiSucceeded(report->journal_header_status[1]);
+  if (!first_valid && !second_valid) {
+    return report->journal_header_status[1];
+  }
+  if (first_valid && second_valid && copies[0].header_sequence == copies[1].header_sequence &&
+      !journal_header_state_equal(&copies[0], &copies[1])) {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
   }
-  if (ZiSucceeded(copy_status[0]) && ZiSucceeded(copy_status[1]) &&
-      !journal_header_state_equal(&copies[0], &copies[1])) {
+  if (first_valid && (!second_valid || copies[0].header_sequence >= copies[1].header_sequence)) {
+    report->journal = copies[0];
+    report->selected_journal_copy = 0;
+  } else {
+    report->journal = copies[1];
+    report->selected_journal_copy = 1;
+  }
+  if (!first_valid || !second_valid) {
     report->needs_recovery = 1;
   }
   if (report->journal.volume_generation != volume->superblock.generation ||
@@ -287,6 +330,7 @@ static ZiStatus inspect_journal(const ZiFsVolume* volume,
                                     &report->journal,
                                     block_buffer,
                                     block_buffer_size,
+                                    overlay,
                                     report);
 }
 
@@ -294,8 +338,10 @@ static ZiStatus inspect_active_transaction(const ZiFsVolume* volume,
                                            const ZiFsJournalHeader* header,
                                            void* block_buffer,
                                            size_t block_buffer_size,
+                                           JournalReplayOverlay* overlay,
                                            ZiFsInspectReport* report) {
-  if (report->occupied_journal_records > ZI_FS_JOURNAL_MAXIMUM_BLOCK_IMAGES + 2u) {
+  if (overlay == NULL ||
+      report->occupied_journal_records > ZI_FS_JOURNAL_MAXIMUM_BLOCK_IMAGES + 2u) {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
   }
   JournalRecordSummary records[ZI_FS_JOURNAL_MAXIMUM_BLOCK_IMAGES + 2u] = {0};
@@ -340,6 +386,7 @@ static ZiStatus inspect_active_transaction(const ZiFsVolume* volume,
   return validate_journal_record_sequence(records,
                                           report->occupied_journal_records,
                                           header,
+                                          overlay,
                                           report);
 }
 
@@ -387,6 +434,42 @@ static ZiStatus inspect_security(const ZiFsVolume* volume,
   }
   free(table);
   return status;
+}
+
+static void inspect_home_metadata(const ZiFsVolume* volume,
+                                  ZiFsInspectReport* report,
+                                  ZiStatus* first_failure) {
+  uint64_t security_ids[ZI_FS_SECURITY_MAXIMUM_RECORDS] = {0};
+  report->security_status =
+      inspect_security(volume, security_ids, ZI_FS_SECURITY_MAXIMUM_RECORDS, report);
+  preserve_first_failure(report->security_status, first_failure);
+
+  unsigned char* expected_blocks = NULL;
+  if (volume->superblock.total_blocks <= ZIFS_INSPECT_MAXIMUM_VOLUME_BLOCKS &&
+      ZiSucceeded(report->security_status)) {
+    expected_blocks = calloc((size_t)volume->superblock.total_blocks, 1);
+    if (expected_blocks == NULL) {
+      report->namespace_status = ZI_STATUS_NO_MEMORY;
+      preserve_first_failure(report->namespace_status, first_failure);
+    }
+  }
+  if (expected_blocks == NULL) {
+    return;
+  }
+  report->namespace_status = mark_metadata_blocks(&volume->superblock, expected_blocks);
+  if (ZiSucceeded(report->namespace_status)) {
+    report->namespace_status = inspect_namespace(volume,
+                                                 security_ids,
+                                                 (size_t)report->security_descriptor_count,
+                                                 expected_blocks,
+                                                 report);
+  }
+  preserve_first_failure(report->namespace_status, first_failure);
+  if (ZiSucceeded(report->namespace_status)) {
+    report->allocation_status = inspect_allocation(volume, expected_blocks, report);
+    preserve_first_failure(report->allocation_status, first_failure);
+  }
+  free(expected_blocks);
 }
 
 static ZiStatus inspect_namespace(const ZiFsVolume* volume,
@@ -522,23 +605,97 @@ static ZiStatus inspect_directories(const ZiFsVolume* volume,
                                     RecordSummary* records,
                                     uint64_t record_capacity,
                                     ZiFsInspectReport* report) {
-  unsigned char block[ZI_FS_BLOCK_SIZE] = {0};
   for (uint64_t index = 0; index < record_capacity; ++index) {
     RecordSummary* summary = &records[index];
     if (summary->present == 0 || summary->record.file_type != ZI_FS_FILE_TYPE_DIRECTORY) {
       continue;
     }
-    ZiStatus status =
-        inspect_directory_entries(volume, records, record_capacity, summary, block, report);
+    ZiStatus status = inspect_directory(volume, records, record_capacity, summary, report);
     if (ZiFailed(status)) {
       return status;
     }
   }
+  return validate_directory_links(volume, records, record_capacity);
+}
+
+static ZiStatus inspect_directory(const ZiFsVolume* volume,
+                                  RecordSummary* records,
+                                  uint64_t record_capacity,
+                                  RecordSummary* directory,
+                                  ZiFsInspectReport* report) {
+  uint64_t block_count = 0;
+  ZiStatus status = ZiFsDirectoryBlockCount(volume, &directory->record, &block_count);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  if (block_count > SIZE_MAX / MAXIMUM_DIRECTORY_ENTRIES) {
+    return ZI_STATUS_BUFFER_TOO_SMALL;
+  }
+  size_t name_capacity = (size_t)block_count * MAXIMUM_DIRECTORY_ENTRIES;
+  if (name_capacity > SIZE_MAX / sizeof(DirectoryNameSummary)) {
+    return ZI_STATUS_BUFFER_TOO_SMALL;
+  }
+  DirectoryNameSummary* names = calloc(name_capacity, sizeof *names);
+  if (names == NULL) {
+    return ZI_STATUS_NO_MEMORY;
+  }
+  DirectoryInspection inspection = {
+      volume,
+      records,
+      record_capacity,
+      directory,
+      names,
+      name_capacity,
+      0,
+      report,
+  };
+  status = inspect_directory_blocks(&inspection, block_count);
+  free(names);
+  return status;
+}
+
+static ZiStatus inspect_directory_blocks(DirectoryInspection* inspection, uint64_t block_count) {
+  unsigned char block[ZI_FS_BLOCK_SIZE] = {0};
+  for (uint64_t logical_block = 0; logical_block < block_count; ++logical_block) {
+    uint64_t physical_block = 0;
+    ZiStatus status = ZiFsDirectoryBlockAt(inspection->volume,
+                                           &inspection->directory->record,
+                                           logical_block,
+                                           &physical_block);
+    if (ZiFailed(status)) {
+      return status;
+    }
+    status = inspection->volume->device.read_blocks(inspection->volume->device.context,
+                                                    physical_block,
+                                                    1,
+                                                    block,
+                                                    sizeof block);
+    if (ZiFailed(status)) {
+      return status;
+    }
+    status = ZiFsValidateDirectoryBlock(block, sizeof block, inspection->directory->record.file_id);
+    if (ZiFailed(status)) {
+      return status;
+    }
+    status = inspect_directory_entries(inspection, block);
+    if (ZiFailed(status)) {
+      return status;
+    }
+  }
+  return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus validate_directory_links(const ZiFsVolume* volume,
+                                         const RecordSummary* records,
+                                         uint64_t record_capacity) {
   for (uint64_t index = 0; index < record_capacity; ++index) {
     if (records[index].present == 0) {
       continue;
     }
-    uint32_t expected_links = index == volume->superblock.root_record_index ? 0u : 1u;
+    uint32_t expected_links = 1;
+    if (index == volume->superblock.root_record_index) {
+      expected_links = 0;
+    }
     if (records[index].link_count != expected_links) {
       return ZI_STATUS_CORRUPT_FILESYSTEM;
     }
@@ -546,22 +703,12 @@ static ZiStatus inspect_directories(const ZiFsVolume* volume,
   return ZI_STATUS_SUCCESS;
 }
 
-static ZiStatus inspect_directory_entries(const ZiFsVolume* volume,
-                                          RecordSummary* records,
-                                          uint64_t record_capacity,
-                                          RecordSummary* directory,
-                                          void* block_buffer,
-                                          ZiFsInspectReport* report) {
-  ZiStatus status = volume->device.read_blocks(volume->device.context,
-                                               directory->record.directory_block,
-                                               1,
-                                               block_buffer,
-                                               ZI_FS_BLOCK_SIZE);
-  if (ZiSucceeded(status)) {
-    status = ZiFsValidateDirectoryBlock(block_buffer, ZI_FS_BLOCK_SIZE, directory->record.file_id);
-  }
-  if (ZiFailed(status)) {
-    return status;
+static ZiStatus inspect_directory_entries(DirectoryInspection* inspection,
+                                          const void* block_buffer) {
+  if (inspection == NULL || inspection->volume == NULL || inspection->records == NULL ||
+      inspection->directory == NULL || block_buffer == NULL || inspection->names == NULL ||
+      inspection->report == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
   }
   const unsigned char* bytes = block_buffer;
   uint32_t entry_count = zi_read_u32_le(bytes + DIRECTORY_ENTRY_COUNT_OFFSET);
@@ -569,7 +716,6 @@ static ZiStatus inspect_directory_entries(const ZiFsVolume* volume,
   if (entry_count > MAXIMUM_DIRECTORY_ENTRIES) {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
   }
-  size_t entry_offsets[MAXIMUM_DIRECTORY_ENTRIES] = {0};
   size_t offset = ZI_FS_DIRECTORY_HEADER_SIZE;
   for (uint32_t index = 0; index < entry_count; ++index) {
     const unsigned char* entry = bytes + offset;
@@ -577,35 +723,40 @@ static ZiStatus inspect_directory_entries(const ZiFsVolume* volume,
     uint16_t name_size = zi_read_u16_le(entry + DIRECTORY_ENTRY_NAME_SIZE_OFFSET);
     uint64_t record_index = zi_read_u64_le(entry + DIRECTORY_ENTRY_RECORD_INDEX_OFFSET);
     if (offset >= used_bytes || entry_size > used_bytes - offset ||
-        record_index >= record_capacity ||
+        record_index >= inspection->record_capacity ||
         zi_read_u16_le(entry + DIRECTORY_ENTRY_FLAGS_OFFSET) != 0 ||
-        records[record_index].present == 0 ||
-        records[record_index].record.file_id !=
+        inspection->records[record_index].present == 0 ||
+        inspection->records[record_index].record.file_id !=
             zi_read_u64_le(entry + DIRECTORY_ENTRY_FILE_ID_OFFSET) ||
-        records[record_index].record.file_type !=
+        inspection->records[record_index].record.file_type !=
             zi_read_u16_le(entry + DIRECTORY_ENTRY_FILE_TYPE_OFFSET) ||
-        records[record_index].record.parent_file_id != directory->record.file_id ||
-        records[record_index].link_count != 0) {
+        inspection->records[record_index].record.parent_file_id !=
+            inspection->directory->record.file_id ||
+        inspection->records[record_index].link_count != 0) {
       return ZI_STATUS_CORRUPT_FILESYSTEM;
     }
     ZiStringView name = {
         (const char*)entry + ZI_FS_DIRECTORY_ENTRY_HEADER_SIZE,
         name_size,
     };
-    for (uint32_t prior = 0; prior < index; ++prior) {
-      const unsigned char* prior_entry = bytes + entry_offsets[prior];
+    for (size_t prior = 0; prior < inspection->name_count; ++prior) {
       ZiStringView prior_name = {
-          (const char*)prior_entry + ZI_FS_DIRECTORY_ENTRY_HEADER_SIZE,
-          zi_read_u16_le(prior_entry + DIRECTORY_ENTRY_NAME_SIZE_OFFSET),
+          inspection->names[prior].data,
+          inspection->names[prior].size,
       };
       int comparison = 0;
       if (ZiFailed(zi_path_compare_component(name, prior_name, &comparison)) || comparison == 0) {
         return ZI_STATUS_CORRUPT_FILESYSTEM;
       }
     }
-    entry_offsets[index] = offset;
-    records[record_index].link_count = 1;
-    ++report->directory_entries;
+    if (inspection->name_count >= inspection->name_capacity) {
+      return ZI_STATUS_BUFFER_TOO_SMALL;
+    }
+    inspection->names[inspection->name_count].size = name_size;
+    zi_memory_copy(inspection->names[inspection->name_count].data, name.data, name.size);
+    ++inspection->name_count;
+    inspection->records[record_index].link_count = 1;
+    ++inspection->report->directory_entries;
     offset += entry_size;
   }
   return offset == used_bytes ? ZI_STATUS_SUCCESS : ZI_STATUS_CORRUPT_FILESYSTEM;
@@ -652,6 +803,20 @@ static ZiStatus inspect_allocation(const ZiFsVolume* volume,
         status = ZI_STATUS_CORRUPT_FILESYSTEM;
       }
     }
+  }
+  uint64_t encoded_bit_count = (uint64_t)bitmap_size * 8u;
+  for (uint64_t block = volume->superblock.total_blocks;
+       ZiSucceeded(status) && block < encoded_bit_count;
+       ++block) {
+    bool allocated = false;
+    status = ZiFsAllocationBitQuery(bitmap, bitmap_size, block, &allocated);
+    if (ZiSucceeded(status) && allocated) {
+      status = ZI_STATUS_CORRUPT_FILESYSTEM;
+    }
+  }
+  if (ZiSucceeded(status) && report->unreferenced_allocated_blocks != 0) {
+    report->needs_recovery = 1;
+    status = ZI_STATUS_RECOVERY_REQUIRED;
   }
   free(bitmap);
   return status;
@@ -747,11 +912,64 @@ static bool journal_header_state_equal(const ZiFsJournalHeader* left,
                 left->flags == right->flags);
 }
 
+static bool journal_target_is_valid(const ZiFsSuperblock* superblock, uint64_t target_block) {
+  return (bool)(target_block < superblock->total_blocks && target_block != 0 &&
+                target_block != superblock->backup_superblock &&
+                !(target_block >= superblock->journal_start &&
+                  target_block - superblock->journal_start < superblock->journal_blocks));
+}
+
+static uint32_t finalise_transaction_checksum(uint32_t checksum) {
+  return checksum == 0 ? UINT32_MAX : checksum;
+}
+
+static ZiStatus replay_overlay_read_blocks(void* context,
+                                           uint64_t first_block,
+                                           uint32_t block_count,
+                                           void* output,
+                                           size_t output_size) {
+  JournalReplayOverlay* overlay = context;
+  if (overlay == NULL || overlay->parent == NULL || overlay->parent->read_blocks == NULL ||
+      output == NULL || block_count == 0 || output_size < (size_t)block_count * ZI_FS_BLOCK_SIZE ||
+      first_block >= overlay->parent->block_count ||
+      block_count > overlay->parent->block_count - first_block) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  unsigned char* output_bytes = output;
+  for (uint32_t block_offset = 0; block_offset < block_count; ++block_offset) {
+    uint64_t block = first_block + block_offset;
+    const unsigned char* image = NULL;
+    for (uint32_t index = 0; index < overlay->image_count; ++index) {
+      if (overlay->target_blocks[index] == block) {
+        image = overlay->block_images[index];
+        break;
+      }
+    }
+    if (image != NULL) {
+      zi_memory_copy(output_bytes + ((size_t)block_offset * ZI_FS_BLOCK_SIZE),
+                     image,
+                     ZI_FS_BLOCK_SIZE);
+      continue;
+    }
+    ZiStatus status =
+        overlay->parent->read_blocks(overlay->parent->context,
+                                     block,
+                                     1,
+                                     output_bytes + ((size_t)block_offset * ZI_FS_BLOCK_SIZE),
+                                     ZI_FS_BLOCK_SIZE);
+    if (ZiFailed(status)) {
+      return status;
+    }
+  }
+  return ZI_STATUS_SUCCESS;
+}
+
 // The single-writer journal contract deliberately validates the whole declared transaction.
 // NOLINTNEXTLINE(readability-function-size, readability-function-cognitive-complexity)
 static ZiStatus validate_journal_record_sequence(const JournalRecordSummary* records,
                                                  uint64_t record_count,
                                                  const ZiFsJournalHeader* header,
+                                                 JournalReplayOverlay* overlay,
                                                  ZiFsInspectReport* report) {
   if (record_count < 3 || records[0].record.record_type != ZI_FS_JOURNAL_RECORD_BEGIN) {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
@@ -759,7 +977,10 @@ static ZiStatus validate_journal_record_sequence(const JournalRecordSummary* rec
   const ZiFsJournalRecord* begin = &records[0].record;
   if (begin->image_count == 0 || begin->image_count > ZI_FS_JOURNAL_MAXIMUM_BLOCK_IMAGES ||
       record_count != (uint64_t)begin->image_count + 2u || begin->source_generation == UINT64_MAX ||
-      begin->target_generation != begin->source_generation + 1u) {
+      begin->target_generation != begin->source_generation + 1u ||
+      begin->target_generation != report->superblock.generation ||
+      begin->target_generation != header->volume_generation ||
+      begin->sequence > UINT64_MAX - (uint64_t)begin->image_count - 1u) {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
   }
   ++report->journal_begin_records;
@@ -771,7 +992,8 @@ static ZiStatus validate_journal_record_sequence(const JournalRecordSummary* rec
         image->transaction_id != begin->transaction_id ||
         image->source_generation != begin->source_generation ||
         image->target_generation != begin->target_generation ||
-        image->sequence != begin->sequence + index + 1u) {
+        image->sequence != begin->sequence + index + 1u ||
+        !journal_target_is_valid(&report->superblock, image->target_block)) {
       return ZI_STATUS_CORRUPT_FILESYSTEM;
     }
     for (uint32_t prior = 0; prior < index; ++prior) {
@@ -787,6 +1009,7 @@ static ZiStatus validate_journal_record_sequence(const JournalRecordSummary* rec
     }
     ++report->journal_block_images;
   }
+  transaction_checksum = finalise_transaction_checksum(transaction_checksum);
   const ZiFsJournalRecord* commit = &records[record_count - 1u].record;
   if (commit->record_type != ZI_FS_JOURNAL_RECORD_COMMIT ||
       commit->transaction_id != begin->transaction_id ||
@@ -797,6 +1020,12 @@ static ZiStatus validate_journal_record_sequence(const JournalRecordSummary* rec
       header->last_committed_transaction != begin->transaction_id ||
       commit->sequence == UINT64_MAX || header->next_sequence != commit->sequence + 1u) {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
+  }
+  overlay->image_count = begin->image_count;
+  for (uint32_t index = 0; index < begin->image_count; ++index) {
+    const ZiFsJournalRecord* image = &records[index + 1u].record;
+    overlay->target_blocks[index] = image->target_block;
+    zi_memory_copy(overlay->block_images[index], image->payload.data, ZI_FS_BLOCK_SIZE);
   }
   ++report->journal_commit_records;
   return ZI_STATUS_SUCCESS;

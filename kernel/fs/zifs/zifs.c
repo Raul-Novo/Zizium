@@ -85,6 +85,8 @@ typedef struct MountSelection {
 
 static bool superblock_ranges_are_valid(const ZiFsSuperblock* superblock);
 static ZiStatus validate_file_record_shape(const ZiFsFileRecord* record);
+static ZiStatus validate_file_record_extents(const ZiFsVolume* volume,
+                                             const ZiFsFileRecord* record);
 static bool extent_overlaps_metadata(const ZiFsSuperblock* superblock,
                                      uint64_t first_block,
                                      uint64_t block_count);
@@ -96,10 +98,6 @@ static ZiStatus validate_directory_block(const void* block, size_t block_size);
 static ZiStatus validate_directory_name(ZiStringView name);
 static void update_directory_checksum(unsigned char* bytes);
 static size_t align_up_eight(size_t value);
-static ZiStatus read_directory_block(const ZiFsVolume* volume,
-                                     uint64_t block_number,
-                                     void* block_buffer,
-                                     size_t block_buffer_size);
 static bool superblocks_have_same_identity(const ZiFsSuperblock* left, const ZiFsSuperblock* right);
 static bool superblocks_have_same_recovery_state(const ZiFsSuperblock* left,
                                                  const ZiFsSuperblock* right);
@@ -368,6 +366,40 @@ ZiStatus ZiFsValidateDirectoryBlock(const void* block,
              : ZI_STATUS_CORRUPT_FILESYSTEM;
 }
 
+ZiStatus ZiFsCanAddDirectoryEntry(const void* block,
+                                  size_t block_size,
+                                  const ZiFsDirectoryEntry* entry,
+                                  bool* out_can_add) {
+  if (block == NULL || entry == NULL || out_can_add == NULL || entry->name.data == NULL ||
+      entry->name.size == 0 || entry->name.size > ZI_FS_MAX_DIRECTORY_NAME_BYTES ||
+      entry->file_id == 0 || entry->file_type < ZI_FS_FILE_TYPE_REGULAR ||
+      entry->file_type > ZI_FS_FILE_TYPE_DEVICE) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  *out_can_add = false;
+  ZiStatus status = validate_directory_block(block, block_size);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  status = validate_directory_name(entry->name);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  ZiFsDirectoryEntry existing = {0};
+  status = ZiFsFindDirectoryEntry(block, block_size, entry->name, &existing);
+  if (ZiSucceeded(status)) {
+    return ZI_STATUS_ALREADY_EXISTS;
+  }
+  if (status != ZI_STATUS_NOT_FOUND) {
+    return status;
+  }
+  const unsigned char* bytes = block;
+  uint32_t used_bytes = zi_read_u32_le(bytes + ZIFS_DIRECTORY_USED_BYTES_OFFSET);
+  size_t entry_size = align_up_eight(ZI_FS_DIRECTORY_ENTRY_HEADER_SIZE + entry->name.size);
+  *out_can_add = entry_size <= ZI_FS_BLOCK_SIZE - used_bytes;
+  return ZI_STATUS_SUCCESS;
+}
+
 ZiStatus ZiFsAddDirectoryEntry(void* block, size_t block_size, const ZiFsDirectoryEntry* entry) {
   if (block == NULL || entry == NULL || entry->name.data == NULL || entry->name.size == 0 ||
       entry->name.size > ZI_FS_MAX_DIRECTORY_NAME_BYTES || entry->file_id == 0 ||
@@ -518,6 +550,8 @@ ZiStatus ZiFsFindDirectoryEntry(const void* block,
   const unsigned char* bytes = block;
   uint32_t entry_count = zi_read_u32_le(bytes + ZIFS_DIRECTORY_ENTRY_COUNT_OFFSET);
   uint32_t used_bytes = zi_read_u32_le(bytes + ZIFS_DIRECTORY_USED_BYTES_OFFSET);
+  bool found = false;
+  ZiFsDirectoryEntry result = {0};
   size_t offset = ZI_FS_DIRECTORY_HEADER_SIZE;
   for (uint32_t index = 0; index < entry_count; ++index) {
     if (offset > used_bytes || ZI_FS_DIRECTORY_ENTRY_HEADER_SIZE > used_bytes - offset) {
@@ -541,16 +575,135 @@ ZiStatus ZiFsFindDirectoryEntry(const void* block,
       return ZI_STATUS_CORRUPT_FILESYSTEM;
     }
     if (comparison == 0) {
-      out_entry->file_type = zi_read_u16_le(source + 4);
-      out_entry->flags = zi_read_u16_le(source + 6);
-      out_entry->file_id = zi_read_u64_le(source + 8);
-      out_entry->record_index = zi_read_u64_le(source + 16);
-      out_entry->name = candidate;
-      return ZI_STATUS_SUCCESS;
+      if (found) {
+        return ZI_STATUS_CORRUPT_FILESYSTEM;
+      }
+      found = true;
+      result.file_type = zi_read_u16_le(source + 4);
+      result.flags = zi_read_u16_le(source + 6);
+      result.file_id = zi_read_u64_le(source + 8);
+      result.record_index = zi_read_u64_le(source + 16);
+      result.name = candidate;
     }
     offset += entry_size;
   }
-  return ZI_STATUS_NOT_FOUND;
+  if (!found) {
+    return ZI_STATUS_NOT_FOUND;
+  }
+  *out_entry = result;
+  return ZI_STATUS_SUCCESS;
+}
+
+ZiStatus ZiFsDirectoryBlockCount(const ZiFsVolume* volume,
+                                 const ZiFsFileRecord* directory,
+                                 uint64_t* out_block_count) {
+  if (volume == NULL || directory == NULL || out_block_count == NULL ||
+      directory->file_type != ZI_FS_FILE_TYPE_DIRECTORY) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  ZiStatus status = ZiFsValidateFileRecord(volume, directory);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  uint64_t continuation_blocks = directory->allocated_size >> ZI_FS_BLOCK_SHIFT;
+  if (continuation_blocks >= ZI_FS_MAX_DIRECTORY_BLOCKS) {
+    return ZI_STATUS_CORRUPT_FILESYSTEM;
+  }
+  *out_block_count = continuation_blocks + 1u;
+  return ZI_STATUS_SUCCESS;
+}
+
+ZiStatus ZiFsDirectoryBlockAt(const ZiFsVolume* volume,
+                              const ZiFsFileRecord* directory,
+                              uint64_t logical_block,
+                              uint64_t* out_physical_block) {
+  if (out_physical_block == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  uint64_t block_count = 0;
+  ZiStatus status = ZiFsDirectoryBlockCount(volume, directory, &block_count);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  if (logical_block >= block_count) {
+    return ZI_STATUS_OUT_OF_BOUNDS;
+  }
+  if (logical_block == 0) {
+    *out_physical_block = directory->directory_block;
+    return ZI_STATUS_SUCCESS;
+  }
+  for (size_t index = 0; index < directory->extent_count; ++index) {
+    const ZiFsExtent* extent = &directory->extents[index];
+    if (logical_block >= extent->logical_block &&
+        logical_block - extent->logical_block < extent->block_count) {
+      *out_physical_block = extent->physical_block + (logical_block - extent->logical_block);
+      return ZI_STATUS_SUCCESS;
+    }
+  }
+  return ZI_STATUS_CORRUPT_FILESYSTEM;
+}
+
+ZiStatus ZiFsFindDirectoryEntryInRecord(const ZiFsVolume* volume,
+                                        const ZiFsFileRecord* directory,
+                                        ZiStringView name,
+                                        void* block_buffer,
+                                        size_t block_buffer_size,
+                                        ZiFsDirectoryEntry* out_entry,
+                                        uint64_t* out_directory_block) {
+  if (volume == NULL || directory == NULL || block_buffer == NULL ||
+      block_buffer_size < ZI_FS_BLOCK_SIZE || out_entry == NULL || out_directory_block == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  ZiStatus status = validate_directory_name(name);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  uint64_t block_count = 0;
+  status = ZiFsDirectoryBlockCount(volume, directory, &block_count);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  bool found = false;
+  ZiFsDirectoryEntry result = {0};
+  uint64_t result_block = 0;
+  for (uint64_t logical_block = 0; logical_block < block_count; ++logical_block) {
+    uint64_t physical_block = 0;
+    status = ZiFsDirectoryBlockAt(volume, directory, logical_block, &physical_block);
+    if (ZiSucceeded(status)) {
+      status = volume->device.read_blocks(volume->device.context,
+                                          physical_block,
+                                          1,
+                                          block_buffer,
+                                          block_buffer_size);
+    }
+    if (ZiSucceeded(status)) {
+      status = ZiFsValidateDirectoryBlock(block_buffer, block_buffer_size, directory->file_id);
+    }
+    if (ZiFailed(status)) {
+      return status;
+    }
+    ZiFsDirectoryEntry candidate = {0};
+    status = ZiFsFindDirectoryEntry(block_buffer, block_buffer_size, name, &candidate);
+    if (status == ZI_STATUS_NOT_FOUND) {
+      continue;
+    }
+    if (ZiFailed(status)) {
+      return status;
+    }
+    if (found) {
+      return ZI_STATUS_CORRUPT_FILESYSTEM;
+    }
+    found = true;
+    result = candidate;
+    result.name = name;
+    result_block = physical_block;
+  }
+  if (!found) {
+    return ZI_STATUS_NOT_FOUND;
+  }
+  *out_entry = result;
+  *out_directory_block = result_block;
+  return ZI_STATUS_SUCCESS;
 }
 
 ZiStatus ZiFsMountVolume(const ZiBlockDevice* device,
@@ -877,17 +1030,15 @@ ZiStatus ZiFsLookupPathRecord(const ZiFsVolume* volume,
     if (current.file_type != ZI_FS_FILE_TYPE_DIRECTORY) {
       return ZI_STATUS_NOT_FOUND;
     }
-    status = read_directory_block(volume, current.directory_block, block_buffer, block_buffer_size);
-    if (ZiFailed(status)) {
-      return status;
-    }
-    status = ZiFsValidateDirectoryBlock(block_buffer, block_buffer_size, current.file_id);
-    if (ZiFailed(status)) {
-      return status;
-    }
     ZiFsDirectoryEntry entry = {0};
-    status =
-        ZiFsFindDirectoryEntry(block_buffer, block_buffer_size, path->components[index], &entry);
+    uint64_t directory_block = 0;
+    status = ZiFsFindDirectoryEntryInRecord(volume,
+                                            &current,
+                                            path->components[index],
+                                            block_buffer,
+                                            block_buffer_size,
+                                            &entry,
+                                            &directory_block);
     if (ZiFailed(status)) {
       return status;
     }
@@ -988,10 +1139,29 @@ static ZiStatus validate_file_record_shape(const ZiFsFileRecord* record) {
   }
 
   if (record->file_type == ZI_FS_FILE_TYPE_DIRECTORY) {
-    return (record->file_size == 0 && record->allocated_size == 0 && record->extent_count == 0 &&
-            record->directory_block != 0)
-               ? ZI_STATUS_SUCCESS
-               : ZI_STATUS_INVALID_ARGUMENT;
+    if (record->file_size != 0 || record->directory_block == 0 ||
+        (record->allocated_size & (ZI_FS_BLOCK_SIZE - 1u)) != 0) {
+      return ZI_STATUS_INVALID_ARGUMENT;
+    }
+    uint64_t expected_logical_block = 1;
+    uint64_t allocated_blocks = 0;
+    for (size_t index = 0; index < record->extent_count; ++index) {
+      const ZiFsExtent* extent = &record->extents[index];
+      if (extent->block_count == 0 || extent->logical_block != expected_logical_block ||
+          extent->flags != 0 || extent->reserved != 0 ||
+          extent->block_count > UINT64_MAX - expected_logical_block ||
+          extent->block_count > UINT64_MAX - allocated_blocks) {
+        return ZI_STATUS_INVALID_ARGUMENT;
+      }
+      expected_logical_block += extent->block_count;
+      allocated_blocks += extent->block_count;
+    }
+    if (allocated_blocks >= ZI_FS_MAX_DIRECTORY_BLOCKS ||
+        allocated_blocks > (UINT64_MAX >> ZI_FS_BLOCK_SHIFT) ||
+        record->allocated_size != (allocated_blocks << ZI_FS_BLOCK_SHIFT)) {
+      return ZI_STATUS_INVALID_ARGUMENT;
+    }
+    return ZI_STATUS_SUCCESS;
   }
   if (record->file_type != ZI_FS_FILE_TYPE_REGULAR) {
     return (record->file_size == 0 && record->allocated_size == 0 && record->extent_count == 0 &&
@@ -1031,6 +1201,29 @@ static ZiStatus validate_file_record_shape(const ZiFsFileRecord* record) {
   return ZI_STATUS_SUCCESS;
 }
 
+static ZiStatus validate_file_record_extents(const ZiFsVolume* volume,
+                                             const ZiFsFileRecord* record) {
+  for (size_t index = 0; index < record->extent_count; ++index) {
+    const ZiFsExtent* extent = &record->extents[index];
+    if (extent->physical_block >= volume->superblock.total_blocks ||
+        extent->block_count > volume->superblock.total_blocks - extent->physical_block ||
+        extent_overlaps_metadata(&volume->superblock,
+                                 extent->physical_block,
+                                 extent->block_count)) {
+      return ZI_STATUS_CORRUPT_FILESYSTEM;
+    }
+    for (size_t other = index + 1u; other < record->extent_count; ++other) {
+      if (ranges_overlap(extent->physical_block,
+                         extent->block_count,
+                         record->extents[other].physical_block,
+                         record->extents[other].block_count)) {
+        return ZI_STATUS_CORRUPT_FILESYSTEM;
+      }
+    }
+  }
+  return ZI_STATUS_SUCCESS;
+}
+
 ZiStatus ZiFsValidateFileRecord(const ZiFsVolume* volume, const ZiFsFileRecord* record) {
   if (volume == NULL || record == NULL) {
     return ZI_STATUS_INVALID_ARGUMENT;
@@ -1042,26 +1235,18 @@ ZiStatus ZiFsValidateFileRecord(const ZiFsVolume* volume, const ZiFsFileRecord* 
   if (record->file_type == ZI_FS_FILE_TYPE_DIRECTORY) {
     uint64_t directory_end =
         volume->superblock.directory_table_start + volume->superblock.directory_table_blocks;
-    return record->directory_block >= volume->superblock.directory_table_start &&
-                   record->directory_block < directory_end
-               ? ZI_STATUS_SUCCESS
-               : ZI_STATUS_CORRUPT_FILESYSTEM;
+    if (record->directory_block < volume->superblock.directory_table_start ||
+        record->directory_block >= directory_end ||
+        (record->extent_count != 0 && (volume->superblock.incompatible_features &
+                                       ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1) == 0)) {
+      return ZI_STATUS_CORRUPT_FILESYSTEM;
+    }
+    return validate_file_record_extents(volume, record);
   }
   if (record->file_type != ZI_FS_FILE_TYPE_REGULAR) {
     return ZI_STATUS_SUCCESS;
   }
-
-  for (size_t index = 0; index < record->extent_count; ++index) {
-    const ZiFsExtent* extent = &record->extents[index];
-    if (extent->physical_block >= volume->superblock.total_blocks ||
-        extent->block_count > volume->superblock.total_blocks - extent->physical_block ||
-        extent_overlaps_metadata(&volume->superblock,
-                                 extent->physical_block,
-                                 extent->block_count)) {
-      return ZI_STATUS_CORRUPT_FILESYSTEM;
-    }
-  }
-  return ZI_STATUS_SUCCESS;
+  return validate_file_record_extents(volume, record);
 }
 
 static bool extent_overlaps_metadata(const ZiFsSuperblock* superblock,
@@ -1196,22 +1381,6 @@ static void update_directory_checksum(unsigned char* bytes) {
 
 static size_t align_up_eight(size_t value) {
   return (value + 7u) & ~(size_t)7u;
-}
-
-static ZiStatus read_directory_block(const ZiFsVolume* volume,
-                                     uint64_t block_number,
-                                     void* block_buffer,
-                                     size_t block_buffer_size) {
-  if (block_number < volume->superblock.directory_table_start ||
-      block_number >=
-          volume->superblock.directory_table_start + volume->superblock.directory_table_blocks) {
-    return ZI_STATUS_CORRUPT_FILESYSTEM;
-  }
-  return volume->device.read_blocks(volume->device.context,
-                                    block_number,
-                                    1,
-                                    block_buffer,
-                                    block_buffer_size);
 }
 
 static bool superblocks_have_same_identity(const ZiFsSuperblock* left,

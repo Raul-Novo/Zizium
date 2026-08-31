@@ -42,6 +42,13 @@ checking, clang-tidy with project diagnostics treated as errors, sanitised host
 tests, and an optional separate Intel compiler validation target are present.
 Missing tools and dependencies produce actionable failures.
 
+Every image build runs `zifsinspect.exe` against both the raw root volume and
+the frozen-GUID GPT partition. `make test` and `make sanitise` additionally run
+eleven inspector fixtures and compare each fixture's SHA-256 before and after the
+tool, proving that validation is non-mutating. Valid metadata exits with zero;
+recovery-required or corrupt metadata exits with one; invocation errors exit
+with two.
+
 The normal boot test requires architecture, PMM, VMM, temporary mapping,
 pool/cache, guarded-stack, memory-stress, timer, pre-emption, ZiFS, framebuffer,
 core-service, session-channel, child-process, wait, and user-mode Luma markers
@@ -52,18 +59,24 @@ before the remaining service/session bootstrap proceeds.
 
 The storage test proves direct QEMU NVMe/GPT mounting and separately contains
 an injected controller timeout and dual-GPT corruption. The ZiFS test uses
-persistent image copies for twenty-five boots: clean create/reboot, pre-commit
-power loss/rollback, post-commit power loss/replay, a 30-record transaction plus
-a five-record transaction crossing slot 31 to slot 0, clean rename/move and
-reboot, move crashes requiring rollback and replay, clean truncate/delete and
-reboot, then separate truncate and delete crashes on both sides of commit with
-matching recovery boots. It rejects a Limine-module fallback and any recovery
-action other than the one required by each case. A deterministic three-block
-file is injected only into those acceptance images so truncate can prove
-partial-tail zeroing and multi-block reclamation; normal images remain
-unchanged. The final case corrupts a durable ZiFS security record, requires
-fail-closed direct-mount rejection, and permits only an explicit clean recovery
-module.
+persistent image copies for twenty-seven boots: clean create/reboot,
+pre-commit power loss/rollback, post-commit power loss/replay, a 30-record
+transaction plus a five-record transaction crossing slot 31 to slot 0, clean
+rename/move and reboot, bounded regular-file growth plus multi-block directory
+expansion and reboot, move crashes requiring rollback and replay, clean
+truncate/delete and reboot, then separate truncate and delete crashes on both
+sides of commit with matching recovery boots. It rejects a Limine-module
+fallback and any recovery action other than the one required by each case. A
+deterministic three-block file is injected only into those acceptance images so
+truncate can prove partial-tail zeroing and multi-block reclamation; normal
+images remain unchanged. The final case corrupts a durable ZiFS security
+record, requires fail-closed direct-mount rejection, and permits only an
+explicit clean recovery module. The suite invokes the read-only inspector
+after clean creation, immediately after the committed pre-checkpoint crash,
+and after directory expansion/file growth. The clean checkpoints must validate
+ordinary on-disk metadata; the crash checkpoint must validate a memory-only
+replay overlay, report recovery required, and leave the image byte-for-byte
+unchanged.
 
 COFF compilation uses `/Brepro`, NASM uses `--reproducible`, and each kernel
 link starts with a fresh PDB so its age cannot perturb the PE debug record.
@@ -72,7 +85,9 @@ only that assembly file receives NASM's narrow `reloc-abs-qword` warning
 suppression.
 Repeated debug and release kernel/image builds have been verified byte-for-byte
 identical. The PE time-date field contains the linker's reproducibility digest,
-not a wall-clock timestamp.
+not a wall-clock timestamp. The latest release check also compared all 21
+kernel, native PE, import/static library, root-volume, and disk-image artefacts
+across consecutive builds without a difference.
 
 ## Scaffolded
 

@@ -18,6 +18,7 @@ typedef struct ZiFsInspectReport {
   uint32_t version;
   ZiStatus primary_superblock_status;
   ZiStatus backup_superblock_status;
+  ZiStatus journal_header_status[ZI_FS_JOURNAL_HEADER_COPIES];
   ZiStatus mount_status;
   ZiStatus journal_status;
   ZiStatus security_status;
@@ -29,7 +30,7 @@ typedef struct ZiFsInspectReport {
   uint32_t selected_superblock_copy;
   uint32_t selected_journal_copy;
   uint32_t needs_recovery;
-  uint32_t reserved;
+  uint32_t inspected_replay_view;
   uint64_t occupied_journal_records;
   uint64_t journal_begin_records;
   uint64_t journal_block_images;

@@ -56,6 +56,7 @@ static unsigned char s_phase7_payload[5000];
 static unsigned char
     s_phase7_large_payload[ZI_FS_TRANSACTION_MAXIMUM_DATA_BLOCKS * ZI_FS_BLOCK_SIZE];
 static unsigned char s_phase7_large_readback[sizeof s_phase7_large_payload];
+static unsigned char s_phase7_growth_expected[10000];
 static Phase7MemoryVolume s_phase7_memory;
 
 static bool phase7_assert(bool condition, const char* expression, int line) {
@@ -84,6 +85,8 @@ static bool test_move_transaction_contract(void);
 static bool test_move_fault_boundaries(void);
 static bool test_truncate_delete_contract(void);
 static bool test_reclamation_fault_boundaries(void);
+static bool test_write_growth_contract(void);
+static bool test_directory_expansion_contract(void);
 static ZiStatus phase7_memory_read(void* context,
                                    uint64_t first_block,
                                    uint32_t block_count,
@@ -98,6 +101,7 @@ static ZiStatus phase7_memory_flush(void* context);
 static bool initialise_transaction_volume(ZiFsVolume* out_volume, bool writable);
 static bool initialise_security_table(void);
 static bool mount_transaction_volume(ZiFsVolume* out_volume, bool writable);
+static bool enable_directory_extents(ZiFsVolume* out_volume, bool writable);
 static bool initialise_move_fixture(ZiFsVolume* out_volume, bool writable);
 static bool add_move_fixture(void);
 static bool add_move_fixture_records(void);
@@ -177,6 +181,12 @@ bool phase7_zifs_wire_test(size_t* out_assertion_count) {
   }
   if (result) {
     result = test_reclamation_fault_boundaries();
+  }
+  if (result) {
+    result = test_write_growth_contract();
+  }
+  if (result) {
+    result = test_directory_expansion_contract();
   }
   *out_assertion_count = s_assertions;
   return result;
@@ -717,6 +727,19 @@ static bool mount_transaction_volume(ZiFsVolume* out_volume, bool writable) {
   }
   unsigned char scratch[ZI_FS_BLOCK_SIZE] = {0};
   return ZiSucceeded(ZiFsMountVolume(&device, scratch, sizeof scratch, out_volume));
+}
+
+static bool enable_directory_extents(ZiFsVolume* out_volume, bool writable) {
+  if (out_volume == NULL) {
+    return false;
+  }
+  ZiFsSuperblock superblock = out_volume->superblock;
+  superblock.incompatible_features |= ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1;
+  if (ZiFailed(ZiFsEncodeSuperblock(&superblock, s_phase7_volume[0], ZI_FS_BLOCK_SIZE))) {
+    return false;
+  }
+  zi_memory_copy(s_phase7_volume[PHASE7_VOLUME_BLOCKS - 1u], s_phase7_volume[0], ZI_FS_BLOCK_SIZE);
+  return mount_transaction_volume(out_volume, writable);
 }
 
 static bool initialise_move_fixture(ZiFsVolume* out_volume, bool writable) {
@@ -2041,5 +2064,398 @@ static bool test_reclamation_fault_boundaries(void) {
                   (deleted ? PHASE7_FIRST_DATA_BLOCK : PHASE7_FIRST_DATA_BLOCK + 2u));
   }
   PHASE7_ASSERT(deleted_count > 0 && present_count > 0);
+  return true;
+}
+
+// Growth covers an existing partial block, a new block, allocation, and the record in one redo set.
+// NOLINTNEXTLINE(readability-function-size, readability-function-cognitive-complexity)
+static bool test_write_growth_contract(void) {
+  const char file_path[] = "C:\\Source Space\\Temp";
+  for (size_t index = 0; index < sizeof s_phase7_payload; ++index) {
+    s_phase7_payload[index] = (unsigned char)(index ^ (index >> 8u) ^ UINT8_C(0xa5));
+    s_phase7_growth_expected[index] = s_phase7_payload[index];
+    s_phase7_growth_expected[sizeof s_phase7_payload + index] =
+        (unsigned char)(index ^ (index >> 7u) ^ UINT8_C(0x3c));
+  }
+
+  ZiFsVolume volume = {0};
+  PHASE7_ASSERT(initialise_move_fixture(&volume, true));
+  ZiFsTransaction transaction = {0};
+  PHASE7_ASSERT(ZiSucceeded(ZiFsTransactionInitialise(&transaction,
+                                                      &volume,
+                                                      s_phase7_workspace,
+                                                      sizeof s_phase7_workspace)));
+  ZiFsWriteRequest request = {
+      sizeof(ZiFsWriteRequest),
+      ZI_FS_WRITE_REQUEST_VERSION,
+      4,
+      sizeof s_phase7_payload + 1u,
+      UINT64_C(25000000),
+      ZI_FS_WRITE_FLAG_NONE,
+      0,
+      {s_phase7_growth_expected + sizeof s_phase7_payload, 1},
+  };
+  ZiFsWriteResult result = {0};
+  PHASE7_ASSERT(ZiFsTransactionPrepareWrite(&transaction, &request, &result) ==
+                    ZI_STATUS_NOT_IMPLEMENTED &&
+                transaction.block_image_count == 0);
+  request.offset = sizeof s_phase7_payload;
+  request.data = (ZiConstBuffer){NULL, 0};
+  PHASE7_ASSERT(ZiFsTransactionPrepareWrite(&transaction, &request, &result) ==
+                ZI_STATUS_INVALID_ARGUMENT);
+  request.data =
+      (ZiConstBuffer){s_phase7_large_payload,
+                      ((size_t)ZI_FS_TRANSACTION_MAXIMUM_DATA_BLOCKS * ZI_FS_BLOCK_SIZE) + 1u};
+  PHASE7_ASSERT(ZiFsTransactionPrepareWrite(&transaction, &request, &result) ==
+                ZI_STATUS_INVALID_ARGUMENT);
+
+  request.data =
+      (ZiConstBuffer){s_phase7_growth_expected + sizeof s_phase7_payload, sizeof s_phase7_payload};
+  PHASE7_ASSERT(ZiSucceeded(ZiFsTransactionPrepareWrite(&transaction, &request, &result)));
+  PHASE7_ASSERT(result.struct_size == sizeof result &&
+                result.version == ZI_FS_WRITE_RESULT_VERSION &&
+                result.file_id == PHASE7_MOVED_FILE_ID && result.record_index == 4 &&
+                result.previous_size == sizeof s_phase7_payload &&
+                result.new_size == sizeof s_phase7_growth_expected &&
+                result.bytes_written == sizeof s_phase7_payload &&
+                result.allocated_block_count == 1 && transaction.block_image_count == 4);
+  ZiConstBuffer image = {0};
+  PHASE7_ASSERT(find_transaction_image(&transaction, PHASE7_RECORD_TABLE_START, &image));
+  ZiFsFileRecord changed = {0};
+  PHASE7_ASSERT(ZiSucceeded(ZiFsDecodeFileRecord((const unsigned char*)image.data +
+                                                     ((size_t)4u * ZI_FS_FILE_RECORD_SIZE),
+                                                 ZI_FS_FILE_RECORD_SIZE,
+                                                 &changed)) &&
+                changed.file_size == sizeof s_phase7_growth_expected && changed.extent_count == 1 &&
+                changed.extents[0].physical_block == PHASE7_FIRST_DATA_BLOCK &&
+                changed.extents[0].block_count == 3 &&
+                changed.allocated_size == UINT64_C(3) * ZI_FS_BLOCK_SIZE);
+  PHASE7_ASSERT(find_transaction_image(&transaction, PHASE7_FIRST_DATA_BLOCK + 1u, &image) &&
+                zi_memory_compare(
+                    (const unsigned char*)image.data + (sizeof s_phase7_payload - ZI_FS_BLOCK_SIZE),
+                    s_phase7_growth_expected + sizeof s_phase7_payload,
+                    ZI_FS_BLOCK_SIZE - (sizeof s_phase7_payload - ZI_FS_BLOCK_SIZE)) == 0);
+  PHASE7_ASSERT(find_transaction_image(&transaction, PHASE7_FIRST_DATA_BLOCK + 2u, &image));
+  PHASE7_ASSERT(ZiFsTransactionCommit(&transaction) == ZI_STATUS_SUCCESS);
+  PHASE7_ASSERT(
+      verify_named_file(&volume,
+                        file_path,
+                        sizeof file_path - 1u,
+                        (ZiConstBuffer){s_phase7_growth_expected, sizeof s_phase7_growth_expected},
+                        true));
+
+  PHASE7_ASSERT(initialise_move_fixture(&volume, true));
+  zi_memory_copy(s_phase7_snapshot, s_phase7_volume, sizeof s_phase7_snapshot);
+  zi_memory_zero(&transaction, sizeof transaction);
+  PHASE7_ASSERT(ZiSucceeded(ZiFsTransactionInitialise(&transaction,
+                                                      &volume,
+                                                      s_phase7_workspace,
+                                                      sizeof s_phase7_workspace)));
+  request.offset = sizeof s_phase7_payload;
+  PHASE7_ASSERT(ZiSucceeded(ZiFsTransactionPrepareWrite(&transaction, &request, &result)));
+  s_phase7_memory.operation_count = 0;
+  PHASE7_ASSERT(ZiFsTransactionCommit(&transaction) == ZI_STATUS_SUCCESS);
+  size_t operation_count = s_phase7_memory.operation_count;
+  PHASE7_ASSERT(operation_count > 0 && operation_count < 100);
+  size_t old_state_count = 0;
+  size_t new_state_count = 0;
+  for (size_t fail_operation = 1; fail_operation <= operation_count; ++fail_operation) {
+    zi_memory_copy(s_phase7_volume, s_phase7_snapshot, sizeof s_phase7_volume);
+    PHASE7_ASSERT(mount_transaction_volume(&volume, true));
+    zi_memory_zero(&transaction, sizeof transaction);
+    PHASE7_ASSERT(ZiSucceeded(ZiFsTransactionInitialise(&transaction,
+                                                        &volume,
+                                                        s_phase7_workspace,
+                                                        sizeof s_phase7_workspace)));
+    PHASE7_ASSERT(ZiSucceeded(ZiFsTransactionPrepareWrite(&transaction, &request, &result)));
+    s_phase7_memory.operation_count = 0;
+    s_phase7_memory.fail_operation = fail_operation;
+    PHASE7_ASSERT(ZiFsTransactionCommit(&transaction) == ZI_STATUS_DEVICE_ERROR);
+    s_phase7_memory.fail_operation = 0;
+    ZiFsVolume restarted = {0};
+    PHASE7_ASSERT(recover_failed_transaction(&volume.device, &restarted));
+    bool old_state = verify_named_file(&restarted,
+                                       file_path,
+                                       sizeof file_path - 1u,
+                                       (ZiConstBuffer){s_phase7_payload, sizeof s_phase7_payload},
+                                       true);
+    bool new_state = verify_named_file(
+        &restarted,
+        file_path,
+        sizeof file_path - 1u,
+        (ZiConstBuffer){s_phase7_growth_expected, sizeof s_phase7_growth_expected},
+        true);
+    PHASE7_ASSERT(old_state != new_state);
+    bool third_block_allocated = false;
+    PHASE7_ASSERT(
+        query_allocation_bit(&restarted, PHASE7_FIRST_DATA_BLOCK + 2u, &third_block_allocated));
+    if (new_state) {
+      ++new_state_count;
+      PHASE7_ASSERT(third_block_allocated && restarted.superblock.generation == 2);
+    } else {
+      ++old_state_count;
+      PHASE7_ASSERT(!third_block_allocated && restarted.superblock.generation == 1);
+    }
+  }
+  PHASE7_ASSERT(old_state_count > 0 && new_state_count > 0);
+  return true;
+}
+
+// Repeated valid creates force a directory continuation block, then exercise its lookup and edits.
+// NOLINTNEXTLINE(readability-function-size, readability-function-cognitive-complexity)
+static bool test_directory_expansion_contract(void) {
+  ZiFsVolume volume = {0};
+  PHASE7_ASSERT(initialise_transaction_volume(&volume, true));
+  PHASE7_ASSERT(enable_directory_extents(&volume, true));
+  char long_name[220];
+  for (size_t index = 0; index < sizeof long_name; ++index) {
+    long_name[index] = 'D';
+  }
+  ZiFsTransaction transaction = {0};
+  ZiFsCreateResult create_result = {0};
+  bool expansion_faults_exercised = false;
+  size_t expansion_old_state_count = 0;
+  size_t expansion_new_state_count = 0;
+  for (size_t index = 0; index < 18; ++index) {
+    long_name[sizeof long_name - 2u] = (char)('A' + (index / 26u));
+    long_name[sizeof long_name - 1u] = (char)('A' + (index % 26u));
+    ZiFsFileRecord current_root = {0};
+    PHASE7_ASSERT(ZiSucceeded(ZiFsReadFileRecord(&volume,
+                                                 volume.superblock.root_record_index,
+                                                 s_phase7_recovery_workspace,
+                                                 ZI_FS_BLOCK_SIZE,
+                                                 &current_root)));
+    zi_memory_zero(&transaction, sizeof transaction);
+    PHASE7_ASSERT(prepare_named_create(&volume,
+                                       &transaction,
+                                       (ZiStringView){long_name, sizeof long_name},
+                                       (ZiConstBuffer){NULL, 0},
+                                       &create_result));
+
+    ZiConstBuffer record_image = {0};
+    ZiFsFileRecord staged_root = {0};
+    PHASE7_ASSERT(
+        find_transaction_image(&transaction, volume.superblock.record_table_start, &record_image) &&
+        ZiSucceeded(ZiFsDecodeFileRecord(record_image.data, ZI_FS_FILE_RECORD_SIZE, &staged_root)));
+    bool expands_directory = staged_root.extent_count > current_root.extent_count;
+    if (expands_directory) {
+      PHASE7_ASSERT(
+          !expansion_faults_exercised && current_root.extent_count == 0 &&
+          staged_root.extent_count == 1 && staged_root.allocated_size == ZI_FS_BLOCK_SIZE &&
+          staged_root.extents[0].logical_block == 1 && staged_root.extents[0].block_count == 1);
+      uint64_t continuation_block = staged_root.extents[0].physical_block;
+      uint64_t source_generation = volume.superblock.generation;
+      char expansion_path[3u + sizeof long_name];
+      expansion_path[0] = 'C';
+      expansion_path[1] = ':';
+      expansion_path[2] = '\\';
+      zi_memory_copy(expansion_path + 3, long_name, sizeof long_name);
+      zi_memory_copy(s_phase7_snapshot, s_phase7_volume, sizeof s_phase7_snapshot);
+
+      s_phase7_memory.operation_count = 0;
+      PHASE7_ASSERT(ZiFsTransactionCommit(&transaction) == ZI_STATUS_SUCCESS);
+      size_t operation_count = s_phase7_memory.operation_count;
+      PHASE7_ASSERT(operation_count > 0 && operation_count < 100 &&
+                    verify_named_file(&volume,
+                                      expansion_path,
+                                      sizeof expansion_path,
+                                      (ZiConstBuffer){NULL, 0},
+                                      true));
+
+      for (size_t fail_operation = 1; fail_operation <= operation_count; ++fail_operation) {
+        zi_memory_copy(s_phase7_volume, s_phase7_snapshot, sizeof s_phase7_volume);
+        PHASE7_ASSERT(mount_transaction_volume(&volume, true));
+        zi_memory_zero(&transaction, sizeof transaction);
+        PHASE7_ASSERT(prepare_named_create(&volume,
+                                           &transaction,
+                                           (ZiStringView){long_name, sizeof long_name},
+                                           (ZiConstBuffer){NULL, 0},
+                                           &create_result));
+        s_phase7_memory.operation_count = 0;
+        s_phase7_memory.fail_operation = fail_operation;
+        PHASE7_ASSERT(ZiFsTransactionCommit(&transaction) == ZI_STATUS_DEVICE_ERROR);
+        s_phase7_memory.fail_operation = 0;
+
+        ZiFsVolume restarted = {0};
+        PHASE7_ASSERT(recover_failed_transaction(&volume.device, &restarted));
+        bool old_state = verify_named_file(&restarted,
+                                           expansion_path,
+                                           sizeof expansion_path,
+                                           (ZiConstBuffer){NULL, 0},
+                                           false);
+        bool new_state = verify_named_file(&restarted,
+                                           expansion_path,
+                                           sizeof expansion_path,
+                                           (ZiConstBuffer){NULL, 0},
+                                           true);
+        PHASE7_ASSERT(old_state != new_state);
+
+        ZiFsFileRecord recovered_root = {0};
+        uint64_t recovered_block_count = 0;
+        bool continuation_allocated = false;
+        PHASE7_ASSERT(
+            ZiSucceeded(ZiFsReadFileRecord(&restarted,
+                                           restarted.superblock.root_record_index,
+                                           s_phase7_recovery_workspace,
+                                           ZI_FS_BLOCK_SIZE,
+                                           &recovered_root)) &&
+            ZiFsDirectoryBlockCount(&restarted, &recovered_root, &recovered_block_count) ==
+                ZI_STATUS_SUCCESS &&
+            query_allocation_bit(&restarted, continuation_block, &continuation_allocated));
+        if (new_state) {
+          ++expansion_new_state_count;
+          PHASE7_ASSERT(restarted.superblock.generation == source_generation + 1u &&
+                        recovered_root.extent_count == 1 && recovered_block_count == 2 &&
+                        recovered_root.extents[0].logical_block == 1 &&
+                        recovered_root.extents[0].physical_block == continuation_block &&
+                        recovered_root.extents[0].block_count == 1 && continuation_allocated);
+        } else {
+          ++expansion_old_state_count;
+          PHASE7_ASSERT(restarted.superblock.generation == source_generation &&
+                        recovered_root.extent_count == 0 && recovered_block_count == 1 &&
+                        !continuation_allocated);
+        }
+      }
+      PHASE7_ASSERT(expansion_old_state_count > 0 && expansion_new_state_count > 0);
+
+      zi_memory_copy(s_phase7_volume, s_phase7_snapshot, sizeof s_phase7_volume);
+      PHASE7_ASSERT(mount_transaction_volume(&volume, true));
+      zi_memory_zero(&transaction, sizeof transaction);
+      PHASE7_ASSERT(prepare_named_create(&volume,
+                                         &transaction,
+                                         (ZiStringView){long_name, sizeof long_name},
+                                         (ZiConstBuffer){NULL, 0},
+                                         &create_result));
+      expansion_faults_exercised = true;
+    }
+    PHASE7_ASSERT(ZiFsTransactionCommit(&transaction) == ZI_STATUS_SUCCESS);
+  }
+  PHASE7_ASSERT(expansion_faults_exercised && expansion_old_state_count > 0 &&
+                expansion_new_state_count > 0);
+
+  ZiFsFileRecord root = {0};
+  PHASE7_ASSERT(ZiSucceeded(ZiFsReadFileRecord(&volume,
+                                               volume.superblock.root_record_index,
+                                               s_phase7_recovery_workspace,
+                                               ZI_FS_BLOCK_SIZE,
+                                               &root)) &&
+                root.file_type == ZI_FS_FILE_TYPE_DIRECTORY && root.extent_count == 1 &&
+                root.allocated_size == ZI_FS_BLOCK_SIZE && root.extents[0].logical_block == 1 &&
+                root.extents[0].block_count == 1);
+  uint64_t directory_block_count = 0;
+  uint64_t continuation_block = 0;
+  PHASE7_ASSERT(
+      ZiFsDirectoryBlockCount(&volume, &root, &directory_block_count) == ZI_STATUS_SUCCESS &&
+      directory_block_count == 2 &&
+      ZiFsDirectoryBlockAt(&volume, &root, 1, &continuation_block) == ZI_STATUS_SUCCESS &&
+      continuation_block == root.extents[0].physical_block &&
+      ZiFsDirectoryBlockAt(&volume, &root, 2, &continuation_block) == ZI_STATUS_OUT_OF_BOUNDS);
+  bool continuation_allocated = false;
+  PHASE7_ASSERT(
+      query_allocation_bit(&volume, root.extents[0].physical_block, &continuation_allocated) &&
+      continuation_allocated);
+
+  char long_path[3u + sizeof long_name];
+  long_path[0] = 'C';
+  long_path[1] = ':';
+  long_path[2] = '\\';
+  zi_memory_copy(long_path + 3, long_name, sizeof long_name);
+  PHASE7_ASSERT(
+      verify_named_file(&volume, long_path, sizeof long_path, (ZiConstBuffer){NULL, 0}, true));
+  long_path[3] = 'd';
+  PHASE7_ASSERT(
+      verify_named_file(&volume, long_path, sizeof long_path, (ZiConstBuffer){NULL, 0}, false));
+  long_path[3] = 'D';
+
+  const ZiStringView renamed = {"Continuation Renamed.txt", sizeof "Continuation Renamed.txt" - 1u};
+  ZiFsMoveResult move_result = {0};
+  zi_memory_zero(&transaction, sizeof transaction);
+  PHASE7_ASSERT(prepare_move(&volume,
+                             &transaction,
+                             0,
+                             (ZiStringView){long_name, sizeof long_name},
+                             0,
+                             renamed,
+                             &move_result));
+  PHASE7_ASSERT(ZiFsTransactionCommit(&transaction) == ZI_STATUS_SUCCESS);
+  PHASE7_ASSERT(
+      verify_named_file(&volume,
+                        "C:\\Continuation Renamed.txt",
+                        sizeof "C:\\Continuation Renamed.txt" - 1u,
+                        (ZiConstBuffer){NULL, 0},
+                        true) &&
+      verify_named_file(&volume, long_path, sizeof long_path, (ZiConstBuffer){NULL, 0}, false));
+
+  ZiFsDeleteRequest delete_request = {
+      sizeof(ZiFsDeleteRequest),
+      ZI_FS_DELETE_REQUEST_VERSION,
+      0,
+      UINT64_C(26000000),
+      ZI_FS_DELETE_FLAG_NONE,
+      0,
+      renamed,
+  };
+  ZiFsDeleteResult delete_result = {0};
+  zi_memory_zero(&transaction, sizeof transaction);
+  PHASE7_ASSERT(
+      ZiSucceeded(ZiFsTransactionInitialise(&transaction,
+                                            &volume,
+                                            s_phase7_workspace,
+                                            sizeof s_phase7_workspace)) &&
+      ZiSucceeded(ZiFsTransactionPrepareDelete(&transaction, &delete_request, &delete_result)) &&
+      ZiFsTransactionCommit(&transaction) == ZI_STATUS_SUCCESS &&
+      verify_named_file(&volume,
+                        "C:\\Continuation Renamed.txt",
+                        sizeof "C:\\Continuation Renamed.txt" - 1u,
+                        (ZiConstBuffer){NULL, 0},
+                        false));
+
+  PHASE7_ASSERT(initialise_transaction_volume(&volume, true));
+  PHASE7_ASSERT(enable_directory_extents(&volume, true));
+  PHASE7_ASSERT(ZiSucceeded(
+      ZiFsReadFileRecord(&volume, 0, s_phase7_recovery_workspace, ZI_FS_BLOCK_SIZE, &root)));
+  root.allocated_size = ZI_FS_BLOCK_SIZE;
+  root.extent_count = 1;
+  root.extents[0].logical_block = 1;
+  root.extents[0].physical_block = PHASE7_FIRST_DATA_BLOCK;
+  root.extents[0].block_count = 1;
+  PHASE7_ASSERT(ZiSucceeded(ZiFsEncodeFileRecord(&root,
+                                                 s_phase7_volume[PHASE7_RECORD_TABLE_START],
+                                                 ZI_FS_FILE_RECORD_SIZE)) &&
+                ZiSucceeded(ZiFsInitialiseDirectoryBlock(s_phase7_volume[PHASE7_FIRST_DATA_BLOCK],
+                                                         ZI_FS_BLOCK_SIZE,
+                                                         root.file_id,
+                                                         1)));
+  ZiFsDirectoryEntry duplicate = {
+      root.file_id,
+      0,
+      ZI_FS_FILE_TYPE_DIRECTORY,
+      0,
+      {"Existing", sizeof "Existing" - 1u},
+  };
+  PHASE7_ASSERT(ZiSucceeded(ZiFsAddDirectoryEntry(s_phase7_volume[PHASE7_FIRST_DATA_BLOCK],
+                                                  ZI_FS_BLOCK_SIZE,
+                                                  &duplicate)) &&
+                ZiSucceeded(ZiFsAllocationBitSet(s_phase7_volume[PHASE7_BITMAP_BLOCK],
+                                                 ZI_FS_BLOCK_SIZE,
+                                                 PHASE7_FIRST_DATA_BLOCK,
+                                                 true)) &&
+                mount_transaction_volume(&volume, true));
+  ZiFsDirectoryEntry found = {0};
+  uint64_t found_block = 0;
+  PHASE7_ASSERT(ZiFsFindDirectoryEntryInRecord(&volume,
+                                               &root,
+                                               duplicate.name,
+                                               s_phase7_recovery_workspace,
+                                               ZI_FS_BLOCK_SIZE,
+                                               &found,
+                                               &found_block) == ZI_STATUS_CORRUPT_FILESYSTEM);
+  ZiFsSuperblock unsupported = volume.superblock;
+  unsupported.incompatible_features &= ~ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1;
+  PHASE7_ASSERT(
+      ZiSucceeded(ZiFsEncodeSuperblock(&unsupported, s_phase7_volume[0], ZI_FS_BLOCK_SIZE)));
+  zi_memory_copy(s_phase7_volume[PHASE7_VOLUME_BLOCKS - 1u], s_phase7_volume[0], ZI_FS_BLOCK_SIZE);
+  ZiFsVolume rejected = {0};
+  PHASE7_ASSERT(!mount_transaction_volume(&rejected, true));
   return true;
 }

@@ -19,9 +19,12 @@
 #define ZI_FS_TRUNCATE_RESULT_VERSION 1u
 #define ZI_FS_DELETE_REQUEST_VERSION 1u
 #define ZI_FS_DELETE_RESULT_VERSION 1u
+#define ZI_FS_WRITE_REQUEST_VERSION 1u
+#define ZI_FS_WRITE_RESULT_VERSION 1u
 #define ZI_FS_MOVE_FLAG_NONE UINT32_C(0)
 #define ZI_FS_TRUNCATE_FLAG_NONE UINT32_C(0)
 #define ZI_FS_DELETE_FLAG_NONE UINT32_C(0)
+#define ZI_FS_WRITE_FLAG_NONE UINT32_C(0)
 #define ZI_FS_TRANSACTION_MINIMUM_BLOCK_IMAGES 1u
 #define ZI_FS_TRANSACTION_MAXIMUM_BLOCK_IMAGES ZI_FS_JOURNAL_MAXIMUM_BLOCK_IMAGES
 #define ZI_FS_TRANSACTION_MAXIMUM_DATA_BLOCKS 24u
@@ -152,6 +155,28 @@ typedef struct ZiFsDeleteResult {
   uint64_t released_block_count;
 } ZiFsDeleteResult;
 
+typedef struct ZiFsWriteRequest {
+  uint32_t struct_size;
+  uint32_t version;
+  uint64_t record_index;
+  uint64_t offset;
+  uint64_t timestamp;
+  uint32_t flags;
+  uint32_t reserved;
+  ZiConstBuffer data;
+} ZiFsWriteRequest;
+
+typedef struct ZiFsWriteResult {
+  uint32_t struct_size;
+  uint32_t version;
+  uint64_t file_id;
+  uint64_t record_index;
+  uint64_t previous_size;
+  uint64_t new_size;
+  uint64_t bytes_written;
+  uint64_t allocated_block_count;
+} ZiFsWriteResult;
+
 ZiStatus ZiFsTransactionInitialise(ZiFsTransaction* transaction,
                                    ZiFsVolume* volume,
                                    void* workspace,
@@ -169,6 +194,9 @@ ZiStatus ZiFsTransactionPrepareTruncate(ZiFsTransaction* transaction,
 ZiStatus ZiFsTransactionPrepareDelete(ZiFsTransaction* transaction,
                                       const ZiFsDeleteRequest* request,
                                       ZiFsDeleteResult* out_result);
+ZiStatus ZiFsTransactionPrepareWrite(ZiFsTransaction* transaction,
+                                     const ZiFsWriteRequest* request,
+                                     ZiFsWriteResult* out_result);
 ZiStatus ZiFsTransactionCommit(ZiFsTransaction* transaction);
 ZiStatus ZiFsTransactionGetBlockImage(const ZiFsTransaction* transaction,
                                       size_t image_index,

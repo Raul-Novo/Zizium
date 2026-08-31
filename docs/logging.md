@@ -45,6 +45,13 @@ slot-31-to-slot-0 commit on the direct NVMe partition;
 `ZIFS_WRAP_PERSISTED` is emitted only after a separate boot has re-read the
 96 KiB and empty-file fixtures and validated the clean ring cursor.
 
+The growth/directory extension emits `ZIFS_DIRECTORY_EXPANDED` only after 18
+long exact-case root entries force a validated continuation block and emits
+`ZIFS_GROWTH_COMMIT` after the one-byte growth fixture reaches 10,000 verified
+bytes. A separate reboot must emit `ZIFS_GROWTH_DIRECTORY_PERSISTED` after
+re-reading every long path, the directory-block mapping, allocation state, and
+the complete grown file. Clean growth boots reject all recovery markers.
+
 The rename/move extension emits `ZIFS_RENAME_MOVE_COMMIT` only after the
 case-only rename and cross-directory move commit, and
 `ZIFS_RENAME_MOVE_PERSISTED` only after a separate boot validates the final

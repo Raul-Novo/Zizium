@@ -43,10 +43,12 @@ disagreement as requiring repair.
 
 Unknown compatible features may be ignored. Unknown read-only-compatible
 features require a read-only mount. Unknown incompatible features reject the
-mount. Incompatible bit 0 identifies the version-one journal contract and bit
-1 identifies the version-one durable security-table contract. Both bits are
-required by newly formatted Seed volumes. All metadata regions must fit, must
-not overlap, and must exclude both superblocks.
+mount. Incompatible bit 0 identifies the version-one journal contract, bit 1
+identifies the version-one durable security-table contract, and bit 2
+(`ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1`) identifies the directory
+continuation contract below. All three bits are required by newly formatted
+Seed volumes. All metadata regions must fit, must not overlap, and must exclude
+both superblocks.
 
 ## File records, extents, and directories
 
@@ -62,6 +64,16 @@ offset 60 calculated over the entire block with that field zeroed. Variable
 entries have a 24-byte header containing aligned entry size, name byte count,
 file type, flags, file ID, and record index. The validated UTF-8 name follows
 and the entry is padded to eight bytes.
+
+Every directory retains its fixed directory-table block as logical block 0.
+When incompatible feature bit 2 is present, the directory record's inline
+extents map continuation blocks beginning at logical block 1. Directory
+`file_size` remains zero; `allocated_size` is the byte capacity of continuation
+blocks only. Extents must be logically contiguous, physically valid,
+non-overlapping, outside metadata, and represented by at most four inline
+records. The current reader, formatter, inspector, and transaction writer
+accept at most 256 directory blocks in total. A directory without continuation
+extents remains wire-compatible with the earlier one-block representation.
 
 Lookup compares the exact encoded sequence. `Temp` and `temp`, and precomposed
 and decomposed spellings, therefore remain distinct.
@@ -129,19 +141,33 @@ prepares no transaction. A case-only target and a canonically distinct UTF-8
 target are different names and may be committed. A bounded record-table walk
 rejects moving a directory beneath itself or one of its descendants.
 
-Same-directory rename stages the directory block and record-table block.
-Cross-directory move stages the source directory, target directory, and
-record-table block. The operation preserves the file ID, record index, file
-type, security reference, extents, and data; it changes the parent file ID and
-change time, and advances each affected directory generation. Path-record
-lookup validates each directory entry against the referenced file record,
-including parent, type, and unique file-ID linkage.
+Same-directory rename stages the source directory block and the changed record
+blocks. Cross-directory move stages the source and target directory blocks and
+their changed records. If the target has no room, insertion atomically allocates
+a continuation block and updates its directory record and allocation bitmap.
+The operation preserves the file ID, record index, file type, security
+reference, extents, and data; it changes the parent file ID and change time,
+updates the affected parent records' modified/change times, and advances each
+affected directory-block generation. Path-record lookup scans every directory
+block and validates each entry against the referenced file record, including
+parent, type, and unique file-ID linkage.
 
 Shrink-only truncation operates on a regular-file record by index. It preserves
 the file ID, record index, parent, security reference, and retained extent
 prefix; updates logical/allocated size and timestamps; zeroes the unused tail
 of a retained partial block; and stages released allocation bits in the same
-transaction. Growth is rejected with `ZI_STATUS_NOT_IMPLEMENTED`.
+transaction.
+
+`ZiFsTransactionPrepareWrite` performs a bounded non-sparse overwrite or
+growth of a regular file by record index. The offset may not exceed the old
+file size and each request carries at most 24 data blocks. Every touched data
+block, the file record, and any changed allocation-map block are one redo set.
+Growth allocates one contiguous suffix run, preferring physical adjacency so
+it can merge with the final extent; otherwise it consumes another of the four
+inline extents. A fifth extent is rejected rather than silently introducing an
+unsupported overflow structure. The operation preserves file and security
+identity, updates logical/allocated size plus modified/change times, and leaves
+newly allocated unwritten bytes zero. Sparse writes are not implemented.
 
 Regular-file deletion removes one exact directory entry, advances the directory
 generation, updates the parent record timestamps, clears the removed 256-byte
@@ -160,8 +186,10 @@ accepts 8–2048 MiB volumes, bounded to at most 16 allocation-map blocks.
 
 The transaction allocator scans the complete map, excludes all metadata and
 superblock ranges, and stages the affected map block rather than modifying the
-mounted volume in place. The current create slice requires one contiguous
-extent of at most 24 blocks.
+mounted volume in place. Create requires one contiguous extent of at most 24
+blocks. Write growth and directory expansion prefer to extend the final
+physical extent; if that range is unavailable they allocate one new contiguous
+suffix extent within the inline limit.
 
 Truncate/delete release bits only in staged bitmap home-block images and record
 each released range as a deferred extent. The current serial writer admits no
@@ -262,9 +290,9 @@ checkpoint worker.
 ## Implemented
 
 - `mkzifs.exe` creates deterministic 8–2048 MiB volumes, 75 required
-  directories, optional bounded host files, scalable allocation maps, both
-  superblocks, both valid journal headers, and the version-one default security
-  descriptor.
+  directories, optional bounded host files, scalable allocation maps,
+  multi-block directory continuation extents where needed, both superblocks,
+  both valid journal headers, and the version-one default security descriptor.
 - The kernel mounts primary or backup metadata through a checked
   `ZiBlockDevice`, validates redundant state, reads files, and performs
   exact-case path lookup. Mount also validates the complete security table and
@@ -274,12 +302,17 @@ checkpoint worker.
   not another root filesystem.
 - A caller-owned in-memory transaction derives capacity from whole workspace
   blocks after two scratch blocks. It supports 1–28 home-block images and
-  stages one new regular file, its file record, directory entry, allocation
-  bits, and up to 24 contiguous data blocks without publishing partial home
-  metadata.
-- Checked directory mutation validates the complete block, rejects duplicate
-  exact names, compacts removed entries, clears vacated bytes, advances the
-  generation, and recomputes CRC32C.
+  stages one new regular file, its file record, directory entry, parent record,
+  allocation bits, and up to 24 contiguous data blocks without publishing
+  partial home metadata.
+- Bounded regular-file write stages non-sparse overwrite or growth through the
+  same transaction engine. It supports up to 24 data blocks per request,
+  contiguous-preferred suffix allocation, and at most four inline extents.
+- Checked directory mutation scans and validates every fixed or continuation
+  block, rejects duplicate exact names across the complete directory, compacts
+  removed entries, clears vacated bytes, advances the generation, and
+  recomputes CRC32C. Create and move can allocate a new continuation block and
+  update the parent record atomically when all existing blocks are full.
 - Atomic same-directory rename and cross-directory move use the same journal
   commit/recovery engine. They enforce exact-case no-replacement semantics,
   reject ancestry cycles and malformed entry/record linkage, and preserve file
@@ -292,6 +325,14 @@ checkpoint worker.
 - The write-ahead commit and single-transaction mount recovery paths implement
   rollback, replay, redundant-superblock repair, root validation, circular
   record addressing, and checkpoint reclamation.
+- `zifsinspect.exe` opens either a raw ZiFS volume or the frozen-GUID partition
+  in a GPT image through a read-only block device. It reports each superblock
+  and journal-header copy, selects valid redundant state, validates journal
+  record order and targets, security records, the complete namespace, extents,
+  cross-links, required allocation bits, padding bits, and leaked allocation.
+  A valid committed transaction is applied only to a heap-owned replay overlay
+  so the prospective recovered metadata can be checked without changing the
+  inspected image. The tool performs neither recovery writes nor repair.
 - Host tests inject failure before every write or flush in a 29-operation
   five-image commit and every one of the 23 operations in a transaction that
   begins at slot 30 and crosses slot 31 to slot 0. Every restart must expose
@@ -305,9 +346,16 @@ checkpoint worker.
   corrupt, unallocated, cross-linked, or metadata extents fail closed. Tests
   also prove that stale speculative work cannot reuse a released block before
   checkpoint and that the first valid post-checkpoint allocation can reuse it.
-- `make zifs-test` boots the real NVMe partition twenty-five times: the original
+- Write-growth tests fail every write/flush operation and require exact old or
+  new content, size, extent, allocation, and generation after recovery. The
+  first one-block-to-two-block directory expansion receives the same exhaustive
+  fault campaign; rollback must leave its name and allocation absent, while
+  replay/commit must expose the second block and exact path together.
+- `make zifs-test` boots the real NVMe partition twenty-seven times: the original
   clean create/reboot, rollback, replay, wrap, and post-wrap cases; clean
-  case-only rename plus cross-directory move and reboot; move rollback/replay;
+  case-only rename plus cross-directory move and reboot; a clean regular-file
+  growth plus 18 long-name creates that force directory expansion and a reboot
+  which revalidates every exact path and byte; move rollback/replay;
   clean truncate/delete plus reboot; and independent pre-/post-commit crash and
   recovery boots for truncate and delete. The rename/move final path is
   `C:\Temp\First Light Seed.exe`; its old and intermediate exact paths must
@@ -317,33 +365,42 @@ checkpoint worker.
   durable ACE byte on the direct partition, requires
   `ZIFS_SECURITY_CORRUPTION_SAFE`, forbids `ZIFS_DIRECT`, and permits only the
   explicitly requested uncorrupted recovery module.
+- Inspector acceptance covers one valid image, one valid formatter-created
+  multi-block directory image, and nine independent corruption or redundancy
+  cases: primary superblock, one journal header, both journal headers,
+  security-record checksum, directory checksum, file-record checksum, a
+  cleared required allocation bit, an allocated but unreferenced block, and an
+  allocation-padding bit. SHA-256 is compared before and after every case.
+  The QEMU suite also inspects the GPT partition after clean creation, at a
+  committed pre-checkpoint crash boundary, and after file/directory growth;
+  the crash case must require recovery while validating the memory-only replay
+  view, while both clean cases must validate on-disk home blocks.
 
 ## Scaffolded or limited
 
 - Transactions are single-writer, bounded to 28 home-block images, and expose
-  creation of one regular file, no-replacement rename/move, shrink-only
-  truncation, or deletion of one regular file per transaction.
-- Only inline extents and one directory block per directory are supported.
-- Move updates the moved record's change time and affected directory
-  generations, but parent-directory file-record timestamps are not yet
-  updated.
-- Truncate cannot grow a file, and delete does not accept directories. There is
-  no open-handle delete-pending state, sharing policy, link count, or public
-  file-object mutation API.
+  one regular-file create, bounded write, no-replacement rename/move,
+  shrink-only truncation, or deletion of one regular file per transaction.
+- Files and directory continuations use at most four inline extents. Directories
+  are bounded to 256 blocks; empty continuation blocks are not compacted or
+  reclaimed, and there is no overflow-extent structure.
+- Truncate remains shrink-only and delete does not accept directories. There is
+  no sparse write, open-handle delete-pending state, sharing policy, link count,
+  or public file-object mutation API.
 - Recovery handles the one in-flight transaction guaranteed by the current
   writer. Mid-device-write tearing is detected by CRC32C and fails closed but
   has no redundant-record reconstruction.
 - The security table is bounded to 16 blocks, 255 descriptors, and 12 inline
   ACEs per descriptor. Descriptor mutation, deduplication, inheritance
   application, and journalled ACL updates are not implemented.
-- There is no public clean-unmount operation, cache, repair utility, or journal
-  inspection command yet.
+- There is no public clean-unmount operation, cache, or repair utility. The
+  inspector is deliberately read-only and cannot make a volume mountable.
 
 ## Future
 
-Write growth, directory deletion, replacement moves, multiple/concurrent
-writers, overflow extents, multi-block directories,
-retained multi-transaction journal history, background checkpointing,
-torn-record redundancy, snapshots, compression, encryption, quotas,
-checksummed trees, and repair tooling remain unimplemented.
+Directory deletion, continuation compaction/reclamation, replacement moves,
+multiple/concurrent writers, sparse writes, overflow extents, retained
+multi-transaction journal history, background checkpointing, torn-record
+redundancy, snapshots, compression, encryption, quotas, checksummed trees,
+clean-unmount semantics, and repair policy/tooling remain unimplemented.
 ZiFS 0.1 is experimental and must not hold irreplaceable data.

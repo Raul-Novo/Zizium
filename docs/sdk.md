@@ -16,16 +16,18 @@ C:\Zizium\SDK\docs
 
 The source tree contains public Zizium headers, minimal standard headers, ZiCRT
 and syscall assembly start-up objects, three C acceptance examples, and
-Windows-host builds of `mkzifs`, `pecheck`, and the ZCC scaffold. The normal
-build emits deterministic `zx.dll`, `zicrt.dll`, and `zia.dll` images and import
-libraries together with the three executed programmes. It also emits
-scaffolded Luma, RuntimeHost, and two unloaded driver images.
+Windows-host builds of `mkzifs`, `pecheck`, the read-only `zifsinspect`, and the
+ZCC scaffold. The normal build emits deterministic `zx.dll`, `zicrt.dll`, and
+`zia.dll` images and import libraries together with the three executed
+programmes. It also emits scaffolded Luma, RuntimeHost, and two unloaded driver
+images.
 
 ## Scaffolded
 
 The reserved tool suite is `zcc`, `zld`, `zasm`, `zdbg`, `zpkg`, `mkzifs`,
-`pecheck`, `symdump`, `zfmt`, `ztest`, and `zmake`. Only the named Seed host
-tools exist, and only `mkzifs` and `pecheck` perform substantive work.
+`pecheck`, `zifsinspect`, `symdump`, `zfmt`, `ztest`, and `zmake`. Only the named
+Seed host tools exist; `mkzifs`, `pecheck`, and `zifsinspect` perform
+substantive work, while ZCC remains a compiler-driver scaffold.
 
 ## Future
 

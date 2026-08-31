@@ -86,6 +86,8 @@ typedef enum ZiFsBootTestMode {
   ZIFS_BOOT_TEST_MODE_DELETE_CRASH_REPLAY = 21,
   ZIFS_BOOT_TEST_MODE_DELETE_VERIFY_OLD = 22,
   ZIFS_BOOT_TEST_MODE_DELETE_VERIFY_NEW = 23,
+  ZIFS_BOOT_TEST_MODE_GROW_DIRECTORY = 24,
+  ZIFS_BOOT_TEST_MODE_GROW_DIRECTORY_VERIFY = 25,
 } ZiFsBootTestMode;
 
 typedef struct ZiFsBootTestSelection {
@@ -96,8 +98,11 @@ typedef struct ZiFsBootTestSelection {
 #define CORE_SERVICE_MANIFEST_COUNT 5u
 #define USER_IMAGE_SOURCE_FILE_LIMIT ((size_t)64u * (size_t)1024u)
 #define USER_IMAGE_SOURCE_TOTAL_LIMIT ((size_t)128u * (size_t)1024u)
-#define ZIFS_TEST_ROLLBACK_FAIL_OPERATION UINT64_C(12)
-#define ZIFS_TEST_REPLAY_FAIL_OPERATION UINT64_C(16)
+#define ZIFS_TEST_ROLLBACK_FAILURE_OFFSET UINT64_C(7)
+#define ZIFS_TEST_REPLAY_FAILURE_OFFSET UINT64_C(11)
+#define ZIFS_GROWTH_FILE_COUNT 18u
+#define ZIFS_GROWTH_NAME_BYTES 220u
+#define ZIFS_GROWTH_PAYLOAD_BYTES 10000u
 
 static const ZiStringView k_user_environment[] = {
     {"SystemRoot=C:\\Zizium", sizeof "SystemRoot=C:\\Zizium" - 1u},
@@ -207,6 +212,8 @@ static const ZiFsBootTestSelection k_zifs_boot_test_selections[] = {
     {"zi.test=zifs-delete-crash-replay", ZIFS_BOOT_TEST_MODE_DELETE_CRASH_REPLAY},
     {"zi.test=zifs-delete-verify-old", ZIFS_BOOT_TEST_MODE_DELETE_VERIFY_OLD},
     {"zi.test=zifs-delete-verify-new", ZIFS_BOOT_TEST_MODE_DELETE_VERIFY_NEW},
+    {"zi.test=zifs-grow-directory", ZIFS_BOOT_TEST_MODE_GROW_DIRECTORY},
+    {"zi.test=zifs-grow-directory-verify", ZIFS_BOOT_TEST_MODE_GROW_DIRECTORY_VERIFY},
 };
 
 static ZiFsVolume g_root_volume;
@@ -280,14 +287,22 @@ static ZiStatus run_zifs_crash_truncate(ZiFsBootTestMode mode);
 static ZiStatus verify_zifs_crash_truncate(bool expected_complete);
 static ZiStatus run_zifs_crash_delete(ZiFsBootTestMode mode);
 static ZiStatus verify_zifs_crash_delete(bool expected_complete);
+static ZiStatus run_zifs_grow_directory(void);
+static ZiStatus verify_zifs_grow_directory(void);
+static ZiStatus make_zifs_growth_name(size_t index,
+                                      char* name,
+                                      size_t name_capacity,
+                                      char* path,
+                                      size_t path_capacity);
 static ZiStatus prepare_and_commit_zifs_move(const char* source_parent_path,
                                              size_t source_parent_path_size,
                                              ZiStringView source_name,
                                              const char* target_parent_path,
                                              size_t target_parent_path_size,
                                              ZiStringView target_name,
-                                             uint32_t expected_image_count,
-                                             uint64_t fail_operation);
+                                             uint32_t minimum_image_count,
+                                             uint32_t maximum_image_count,
+                                             uint64_t failure_offset);
 static ZiStatus prepare_and_commit_zifs_truncate(const char* file_path,
                                                  size_t file_path_size,
                                                  uint64_t new_size,
@@ -303,6 +318,10 @@ static ZiStatus prepare_and_commit_zifs_create(const char* parent_path,
                                                ZiStringView name,
                                                ZiConstBuffer data,
                                                ZiFsCreateResult* out_result);
+static ZiStatus prepare_and_commit_zifs_write(uint64_t record_index,
+                                              uint64_t offset,
+                                              ZiConstBuffer data,
+                                              ZiFsWriteResult* out_result);
 static ZiStatus
 verify_zifs_truncated_pe(const char* file_path, size_t file_path_size, uint64_t expected_size);
 static ZiStatus
@@ -1069,19 +1088,15 @@ static ZiStatus fault_block_flush(void* context) {
 }
 
 static uint64_t zifs_test_fault_operation(const char* command_line) {
-  if (command_line_has_token(command_line, "zi.test=zifs-move-crash-rollback") ||
+  if (command_line_has_token(command_line, "zi.test=zifs-crash-rollback") ||
+      command_line_has_token(command_line, "zi.test=zifs-crash-replay") ||
+      command_line_has_token(command_line, "zi.test=zifs-move-crash-rollback") ||
       command_line_has_token(command_line, "zi.test=zifs-move-crash-replay") ||
       command_line_has_token(command_line, "zi.test=zifs-truncate-crash-rollback") ||
       command_line_has_token(command_line, "zi.test=zifs-truncate-crash-replay") ||
       command_line_has_token(command_line, "zi.test=zifs-delete-crash-rollback") ||
       command_line_has_token(command_line, "zi.test=zifs-delete-crash-replay")) {
     return UINT64_MAX;
-  }
-  if (command_line_has_token(command_line, "zi.test=zifs-crash-rollback")) {
-    return ZIFS_TEST_ROLLBACK_FAIL_OPERATION;
-  }
-  if (command_line_has_token(command_line, "zi.test=zifs-crash-replay")) {
-    return ZIFS_TEST_REPLAY_FAIL_OPERATION;
   }
   return 0;
 }
@@ -1139,6 +1154,22 @@ static ZiStatus run_requested_zifs_test(const ZiBootContext* context) {
   }
   if (mode == ZIFS_BOOT_TEST_MODE_NONE) {
     return ZI_STATUS_SUCCESS;
+  }
+  if (mode == ZIFS_BOOT_TEST_MODE_GROW_DIRECTORY) {
+    status = run_zifs_grow_directory();
+    if (ZiSucceeded(status)) {
+      zi_log_boot_marker("ZIFS_GROWTH_COMMIT");
+      ZkArchHalt();
+    }
+    return status;
+  }
+  if (mode == ZIFS_BOOT_TEST_MODE_GROW_DIRECTORY_VERIFY) {
+    status = verify_zifs_grow_directory();
+    if (ZiSucceeded(status)) {
+      zi_log_boot_marker("ZIFS_GROWTH_DIRECTORY_PERSISTED");
+      ZkArchHalt();
+    }
+    return status;
   }
   if (mode == ZIFS_BOOT_TEST_MODE_TRUNCATE_DELETE) {
     status = run_zifs_truncate_delete();
@@ -1317,14 +1348,29 @@ static ZiStatus run_requested_zifs_test(const ZiBootContext* context) {
   if (ZiFailed(status)) {
     return status;
   }
-  if (transaction.block_image_count != 5 || result.data_block_count != 2) {
+  if (transaction.block_image_count < 5 || transaction.block_image_count > 6 ||
+      result.data_block_count != 2) {
     return ZI_STATUS_INVALID_STATE;
+  }
+  uint64_t failure_offset = 0;
+  if (mode == ZIFS_BOOT_TEST_MODE_CRASH_ROLLBACK) {
+    failure_offset = ZIFS_TEST_ROLLBACK_FAILURE_OFFSET;
+  } else if (mode == ZIFS_BOOT_TEST_MODE_CRASH_REPLAY) {
+    failure_offset = ZIFS_TEST_REPLAY_FAILURE_OFFSET;
+  }
+  if (failure_offset != 0) {
+    if (g_root_volume.device.context != &g_zifs_fault_context ||
+        g_zifs_fault_context.fail_operation != UINT64_MAX) {
+      return ZI_STATUS_INVALID_STATE;
+    }
+    g_zifs_fault_context.operation_count = 0;
+    g_zifs_fault_context.fail_operation = transaction.block_image_count + failure_offset;
   }
   status = ZiFsTransactionCommit(&transaction);
   if (mode == ZIFS_BOOT_TEST_MODE_CRASH_ROLLBACK || mode == ZIFS_BOOT_TEST_MODE_CRASH_REPLAY) {
-    uint64_t expected_operation = ZIFS_TEST_REPLAY_FAIL_OPERATION;
+    uint64_t expected_operation = transaction.block_image_count + ZIFS_TEST_REPLAY_FAILURE_OFFSET;
     if (mode == ZIFS_BOOT_TEST_MODE_CRASH_ROLLBACK) {
-      expected_operation = ZIFS_TEST_ROLLBACK_FAIL_OPERATION;
+      expected_operation = transaction.block_image_count + ZIFS_TEST_ROLLBACK_FAILURE_OFFSET;
     }
     if (status != ZI_STATUS_DEVICE_ERROR ||
         g_zifs_fault_context.operation_count != expected_operation ||
@@ -1355,6 +1401,159 @@ static ZiStatus verify_zifs_test_file(bool expected_present) {
                                 sizeof file_path - 1u,
                                 (ZiConstBuffer){g_zifs_test_payload, sizeof g_zifs_test_payload},
                                 expected_present);
+}
+
+static ZiStatus make_zifs_growth_name(size_t index,
+                                      char* name,
+                                      size_t name_capacity,
+                                      char* path,
+                                      size_t path_capacity) {
+  if (index >= ZIFS_GROWTH_FILE_COUNT || name == NULL || name_capacity <= ZIFS_GROWTH_NAME_BYTES ||
+      path == NULL || path_capacity <= ZIFS_GROWTH_NAME_BYTES + 3u) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  for (size_t byte_index = 0; byte_index < ZIFS_GROWTH_NAME_BYTES - 2u; ++byte_index) {
+    name[byte_index] = 'D';
+  }
+  name[ZIFS_GROWTH_NAME_BYTES - 2u] = 'A';
+  name[ZIFS_GROWTH_NAME_BYTES - 1u] = (char)('A' + index);
+  name[ZIFS_GROWTH_NAME_BYTES] = '\0';
+  path[0] = 'C';
+  path[1] = ':';
+  path[2] = '\\';
+  zi_memory_copy(path + 3u, name, ZIFS_GROWTH_NAME_BYTES + 1u);
+  return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus verify_zifs_grow_directory(void) {
+  const char growth_path[] = "C:\\Growth Seed.bin";
+  for (size_t index = 0; index < ZIFS_GROWTH_PAYLOAD_BYTES; ++index) {
+    g_zifs_wrap_payload[index] =
+        (unsigned char)(index ^ (index >> 8u) ^ (index >> 16u) ^ UINT8_C(0xa5));
+  }
+
+  ZiFsFileRecord root = {0};
+  ZiStatus status = ZiFsReadFileRecord(&g_root_volume,
+                                       g_root_volume.superblock.root_record_index,
+                                       g_zifs_block_buffer,
+                                       sizeof g_zifs_block_buffer,
+                                       &root);
+  uint64_t directory_block_count = 0;
+  uint64_t continuation_block = 0;
+  if (ZiSucceeded(status)) {
+    status = ZiFsDirectoryBlockCount(&g_root_volume, &root, &directory_block_count);
+  }
+  if (ZiSucceeded(status)) {
+    status = ZiFsDirectoryBlockAt(&g_root_volume, &root, 1, &continuation_block);
+  }
+  if (ZiFailed(status) || root.file_type != ZI_FS_FILE_TYPE_DIRECTORY || root.extent_count == 0 ||
+      root.allocated_size < ZI_FS_BLOCK_SIZE || directory_block_count < 2 ||
+      continuation_block >= g_root_volume.superblock.total_blocks ||
+      (g_root_volume.superblock.incompatible_features &
+       ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1) == 0) {
+    return failure_status_or(status, ZI_STATUS_CORRUPT_FILESYSTEM);
+  }
+
+  char name[ZIFS_GROWTH_NAME_BYTES + 1u] = {0};
+  char path[ZIFS_GROWTH_NAME_BYTES + 4u] = {0};
+  status = make_zifs_growth_name(ZIFS_GROWTH_FILE_COUNT - 1u, name, sizeof name, path, sizeof path);
+  if (ZiSucceeded(status)) {
+    status =
+        verify_zifs_named_file(path, ZIFS_GROWTH_NAME_BYTES + 3u, (ZiConstBuffer){NULL, 0}, true);
+  }
+  if (ZiSucceeded(status)) {
+    path[3] = 'd';
+    status =
+        verify_zifs_named_file(path, ZIFS_GROWTH_NAME_BYTES + 3u, (ZiConstBuffer){NULL, 0}, false);
+  }
+  if (ZiSucceeded(status)) {
+    status = verify_zifs_named_file(growth_path,
+                                    sizeof growth_path - 1u,
+                                    (ZiConstBuffer){g_zifs_wrap_payload, ZIFS_GROWTH_PAYLOAD_BYTES},
+                                    true);
+  }
+  return status;
+}
+
+// Sequential transactions deliberately exercise the first directory continuation allocation.
+// NOLINTNEXTLINE(readability-function-size, readability-function-cognitive-complexity)
+static ZiStatus run_zifs_grow_directory(void) {
+  const char root_path[] = "C:\\";
+  const char growth_path[] = "C:\\Growth Seed.bin";
+  const ZiStringView growth_name = {"Growth Seed.bin", sizeof "Growth Seed.bin" - 1u};
+  for (size_t index = 0; index < ZIFS_GROWTH_PAYLOAD_BYTES; ++index) {
+    g_zifs_wrap_payload[index] =
+        (unsigned char)(index ^ (index >> 8u) ^ (index >> 16u) ^ UINT8_C(0xa5));
+  }
+
+  ZiStatus status =
+      verify_zifs_named_file(growth_path, sizeof growth_path - 1u, (ZiConstBuffer){NULL, 0}, false);
+  ZiFsCreateResult create_result = {0};
+  if (ZiSucceeded(status)) {
+    status = prepare_and_commit_zifs_create(root_path,
+                                            sizeof root_path - 1u,
+                                            growth_name,
+                                            (ZiConstBuffer){g_zifs_wrap_payload, 1},
+                                            &create_result);
+  }
+  if (ZiFailed(status) || create_result.data_block_count != 1) {
+    return failure_status_or(status, ZI_STATUS_INVALID_STATE);
+  }
+
+  char name[ZIFS_GROWTH_NAME_BYTES + 1u] = {0};
+  char path[ZIFS_GROWTH_NAME_BYTES + 4u] = {0};
+  for (size_t index = 0; index < ZIFS_GROWTH_FILE_COUNT; ++index) {
+    status = make_zifs_growth_name(index, name, sizeof name, path, sizeof path);
+    if (ZiSucceeded(status)) {
+      zi_memory_zero(&create_result, sizeof create_result);
+      status = prepare_and_commit_zifs_create(root_path,
+                                              sizeof root_path - 1u,
+                                              (ZiStringView){name, ZIFS_GROWTH_NAME_BYTES},
+                                              (ZiConstBuffer){NULL, 0},
+                                              &create_result);
+    }
+    if (ZiFailed(status) || create_result.data_block_count != 0) {
+      return failure_status_or(status, ZI_STATUS_INVALID_STATE);
+    }
+  }
+
+  ZiFsFileRecord root = {0};
+  status = ZiFsReadFileRecord(&g_root_volume,
+                              g_root_volume.superblock.root_record_index,
+                              g_zifs_block_buffer,
+                              sizeof g_zifs_block_buffer,
+                              &root);
+  uint64_t directory_block_count = 0;
+  if (ZiSucceeded(status)) {
+    status = ZiFsDirectoryBlockCount(&g_root_volume, &root, &directory_block_count);
+  }
+  if (ZiFailed(status) || root.extent_count == 0 || directory_block_count < 2 ||
+      root.allocated_size < ZI_FS_BLOCK_SIZE) {
+    return failure_status_or(status, ZI_STATUS_INVALID_STATE);
+  }
+  zi_log_boot_marker("ZIFS_DIRECTORY_EXPANDED");
+
+  ZiFsFileRecord growth_record = {0};
+  uint64_t growth_record_index = 0;
+  status = lookup_zifs_record(growth_path,
+                              sizeof growth_path - 1u,
+                              &growth_record,
+                              &growth_record_index);
+  ZiFsWriteResult write_result = {0};
+  if (ZiSucceeded(status)) {
+    status = prepare_and_commit_zifs_write(
+        growth_record_index,
+        1,
+        (ZiConstBuffer){g_zifs_wrap_payload + 1u, ZIFS_GROWTH_PAYLOAD_BYTES - 1u},
+        &write_result);
+  }
+  if (ZiFailed(status) || growth_record.file_size != 1 || write_result.previous_size != 1 ||
+      write_result.new_size != ZIFS_GROWTH_PAYLOAD_BYTES ||
+      write_result.bytes_written != ZIFS_GROWTH_PAYLOAD_BYTES - 1u ||
+      write_result.allocated_block_count != 2) {
+    return failure_status_or(status, ZI_STATUS_INVALID_STATE);
+  }
+  return verify_zifs_grow_directory();
 }
 
 // The two commits intentionally consume 30 then five records in a 32-record ring.
@@ -1406,9 +1605,11 @@ static ZiStatus run_zifs_wrap_create(void) {
     return status;
   }
   if (transaction.block_image_capacity != ZI_FS_TRANSACTION_MAXIMUM_BLOCK_IMAGES ||
-      transaction.block_image_count != 27 || result.data_block_count != 24) {
+      transaction.block_image_count < 27 || transaction.block_image_count > 28 ||
+      result.data_block_count != 24) {
     return ZI_STATUS_INVALID_STATE;
   }
+  uint64_t total_journal_records = (uint64_t)transaction.block_image_count + 3u;
   status = ZiFsTransactionCommit(&transaction);
   if (ZiFailed(status)) {
     return status;
@@ -1428,9 +1629,11 @@ static ZiStatus run_zifs_wrap_create(void) {
   if (ZiFailed(status)) {
     return status;
   }
-  if (transaction.block_image_count != 2 || result.data_block_count != 0) {
+  if (transaction.block_image_count < 2 || transaction.block_image_count > 3 ||
+      result.data_block_count != 0) {
     return ZI_STATUS_INVALID_STATE;
   }
+  total_journal_records += (uint64_t)transaction.block_image_count + 3u;
   status = ZiFsTransactionCommit(&transaction);
   if (ZiFailed(status)) {
     return status;
@@ -1446,9 +1649,11 @@ static ZiStatus run_zifs_wrap_create(void) {
                                  &journal_copy);
   uint64_t occupied_records = 0;
   uint64_t available_records = 0;
-  if (ZiFailed(status) || journal.head_record != 3 || journal.tail_record != 3 ||
-      journal.next_sequence != 36 || journal.last_committed_transaction != 2 ||
-      journal.last_checkpoint_transaction != 2 ||
+  if (ZiFailed(status) || total_journal_records <= journal.record_capacity ||
+      journal.head_record != total_journal_records % journal.record_capacity ||
+      journal.tail_record != journal.head_record ||
+      journal.next_sequence != total_journal_records + 1u ||
+      journal.last_committed_transaction != 2 || journal.last_checkpoint_transaction != 2 ||
       ZiFailed(ZiFsJournalQuerySpace(&journal, &occupied_records, &available_records)) ||
       occupied_records != 0 || available_records != 31) {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
@@ -1487,8 +1692,10 @@ static ZiStatus run_zifs_wrap_verify(void) {
                                    &journal,
                                    &journal_copy);
   }
-  if (ZiFailed(status) || journal.head_record != 3 || journal.tail_record != 3 ||
-      journal.next_sequence != 36 || journal.last_committed_transaction != 2 ||
+  if (ZiFailed(status) || journal.record_capacity == 0 ||
+      journal.next_sequence <= journal.record_capacity + 1u ||
+      journal.head_record != (journal.next_sequence - 1u) % journal.record_capacity ||
+      journal.tail_record != journal.head_record || journal.last_committed_transaction != 2 ||
       journal.last_checkpoint_transaction != 2) {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
   }
@@ -1510,6 +1717,7 @@ static ZiStatus run_zifs_rename_move(void) {
                                           sizeof source_parent - 1u,
                                           renamed_name,
                                           2,
+                                          3,
                                           0);
   }
   if (ZiSucceeded(status)) {
@@ -1520,6 +1728,7 @@ static ZiStatus run_zifs_rename_move(void) {
                                           sizeof target_parent - 1u,
                                           moved_name,
                                           3,
+                                          5,
                                           0);
   }
   if (ZiSucceeded(status)) {
@@ -1539,9 +1748,9 @@ static ZiStatus run_zifs_crash_move(ZiFsBootTestMode mode) {
   }
   const char source_parent[] = "C:\\Program Files\\Zizium";
   const char target_parent[] = "C:\\Temp";
-  uint64_t fail_operation = 3u + 7u;
+  uint64_t failure_offset = ZIFS_TEST_ROLLBACK_FAILURE_OFFSET;
   if (mode == ZIFS_BOOT_TEST_MODE_MOVE_CRASH_REPLAY) {
-    fail_operation = 3u + 11u;
+    failure_offset = ZIFS_TEST_REPLAY_FAILURE_OFFSET;
   }
   return prepare_and_commit_zifs_move(
       source_parent,
@@ -1551,7 +1760,8 @@ static ZiStatus run_zifs_crash_move(ZiFsBootTestMode mode) {
       sizeof target_parent - 1u,
       (ZiStringView){"Crash Moved Seed.exe", sizeof "Crash Moved Seed.exe" - 1u},
       3,
-      fail_operation);
+      5,
+      failure_offset);
 }
 
 static ZiStatus verify_zifs_rename_move(bool expected_complete) {
@@ -2013,6 +2223,37 @@ static ZiStatus prepare_and_commit_zifs_create(const char* parent_path,
   return status;
 }
 
+static ZiStatus prepare_and_commit_zifs_write(uint64_t record_index,
+                                              uint64_t offset,
+                                              ZiConstBuffer data,
+                                              ZiFsWriteResult* out_result) {
+  if (out_result == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  ZiFsTransaction transaction = {0};
+  ZiStatus status = ZiFsTransactionInitialise(&transaction,
+                                              &g_root_volume,
+                                              g_zifs_transaction_workspace,
+                                              sizeof g_zifs_transaction_workspace);
+  ZiFsWriteRequest request = {
+      sizeof(ZiFsWriteRequest),
+      ZI_FS_WRITE_REQUEST_VERSION,
+      record_index,
+      offset,
+      UINT64_C(27000000),
+      ZI_FS_WRITE_FLAG_NONE,
+      0,
+      data,
+  };
+  if (ZiSucceeded(status)) {
+    status = ZiFsTransactionPrepareWrite(&transaction, &request, out_result);
+  }
+  if (ZiSucceeded(status)) {
+    status = ZiFsTransactionCommit(&transaction);
+  }
+  return status;
+}
+
 static ZiStatus
 verify_zifs_truncated_pe(const char* file_path, size_t file_path_size, uint64_t expected_size) {
   ZiFsFileRecord record = {0};
@@ -2108,8 +2349,9 @@ static ZiStatus prepare_and_commit_zifs_move(const char* source_parent_path,
                                              const char* target_parent_path,
                                              size_t target_parent_path_size,
                                              ZiStringView target_name,
-                                             uint32_t expected_image_count,
-                                             uint64_t fail_operation) {
+                                             uint32_t minimum_image_count,
+                                             uint32_t maximum_image_count,
+                                             uint64_t failure_offset) {
   ZiFsFileRecord source_parent = {0};
   ZiFsFileRecord target_parent = {0};
   uint64_t source_parent_record_index = 0;
@@ -2155,7 +2397,8 @@ static ZiStatus prepare_and_commit_zifs_move(const char* source_parent_path,
   if (ZiFailed(status)) {
     return status;
   }
-  if (transaction.block_image_count != expected_image_count || result.file_id == 0 ||
+  if (transaction.block_image_count < minimum_image_count ||
+      transaction.block_image_count > maximum_image_count || result.file_id == 0 ||
       result.record_index == g_root_volume.superblock.root_record_index ||
       result.source_parent_file_id != source_parent.file_id ||
       result.target_parent_file_id != target_parent.file_id ||
@@ -2163,10 +2406,14 @@ static ZiStatus prepare_and_commit_zifs_move(const char* source_parent_path,
     return ZI_STATUS_INVALID_STATE;
   }
 
-  if (fail_operation != 0) {
-    if (g_root_volume.device.context != &g_zifs_fault_context || fail_operation == UINT64_MAX) {
+  uint64_t fail_operation = 0;
+  if (failure_offset != 0) {
+    if (g_root_volume.device.context != &g_zifs_fault_context ||
+        g_zifs_fault_context.fail_operation != UINT64_MAX ||
+        transaction.block_image_count > UINT64_MAX - failure_offset) {
       return ZI_STATUS_INVALID_STATE;
     }
+    fail_operation = transaction.block_image_count + failure_offset;
     g_zifs_fault_context.operation_count = 0;
     g_zifs_fault_context.fail_operation = fail_operation;
   }

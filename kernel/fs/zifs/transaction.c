@@ -21,6 +21,13 @@ static ZiStatus transaction_fail(ZiFsTransaction* transaction, ZiStatus status);
 static unsigned char* transaction_scratch(const ZiFsTransaction* transaction);
 static unsigned char* transaction_image_data(const ZiFsTransaction* transaction,
                                              size_t image_index);
+static const unsigned char* transaction_staged_block(const ZiFsTransaction* transaction,
+                                                     uint64_t target_block);
+static ZiStatus transaction_read_block_view(const ZiFsTransaction* transaction,
+                                            uint64_t target_block,
+                                            void* scratch,
+                                            size_t scratch_size,
+                                            const unsigned char** out_data);
 static ZiStatus transaction_stage_existing_block(ZiFsTransaction* transaction,
                                                  uint64_t target_block,
                                                  unsigned char** out_data);
@@ -31,7 +38,26 @@ static ZiStatus validate_create_request(const ZiFsCreateRequest* request);
 static ZiStatus validate_move_request(const ZiFsMoveRequest* request);
 static ZiStatus validate_truncate_request(const ZiFsTruncateRequest* request);
 static ZiStatus validate_delete_request(const ZiFsDeleteRequest* request);
+static ZiStatus validate_write_request(const ZiFsWriteRequest* request);
 static ZiStatus validate_transaction_name(ZiStringView name);
+static ZiStatus find_directory_insertion_block(ZiFsTransaction* transaction,
+                                               const ZiFsFileRecord* directory,
+                                               const ZiFsDirectoryEntry* entry,
+                                               uint64_t* out_block);
+static ZiStatus stage_new_directory_block(ZiFsTransaction* transaction,
+                                          ZiFsFileRecord* directory,
+                                          const ZiFsDirectoryEntry* entry,
+                                          uint64_t* out_block);
+static ZiStatus stage_directory_entry(ZiFsTransaction* transaction,
+                                      ZiFsFileRecord* directory,
+                                      const ZiFsDirectoryEntry* entry,
+                                      uint64_t* out_block,
+                                      bool* out_expanded);
+static ZiStatus stage_directory_removal(ZiFsTransaction* transaction,
+                                        const ZiFsFileRecord* directory,
+                                        uint64_t directory_block,
+                                        ZiStringView name,
+                                        ZiFsDirectoryEntry* out_entry);
 static ZiStatus find_record_by_file_id(const ZiFsVolume* volume,
                                        uint64_t file_id,
                                        void* scratch,
@@ -53,11 +79,24 @@ static ZiStatus find_free_record(const ZiFsVolume* volume,
                                  size_t scratch_size,
                                  uint64_t* out_record_index,
                                  uint64_t* out_file_id);
-static ZiStatus find_free_extent(const ZiFsVolume* volume,
+static ZiStatus find_free_extent(const ZiFsTransaction* transaction,
                                  uint64_t requested_blocks,
-                                 void* scratch,
-                                 size_t scratch_size,
                                  uint64_t* out_first_block);
+static ZiStatus find_append_extent(const ZiFsTransaction* transaction,
+                                   const ZiFsFileRecord* record,
+                                   uint64_t requested_blocks,
+                                   uint64_t* out_first_block);
+static ZiStatus range_is_free(const ZiFsTransaction* transaction,
+                              uint64_t first_block,
+                              uint64_t block_count,
+                              bool* out_is_free);
+static ZiStatus append_record_extent(ZiFsFileRecord* record,
+                                     uint64_t logical_block,
+                                     uint64_t physical_block,
+                                     uint64_t block_count);
+static ZiStatus record_physical_block(const ZiFsFileRecord* record,
+                                      uint64_t logical_block,
+                                      uint64_t* out_physical_block);
 static ZiStatus
 stage_extent_allocation(ZiFsTransaction* transaction, uint64_t first_block, uint64_t block_count);
 static ZiStatus
@@ -401,16 +440,15 @@ ZiStatus ZiFsTransactionPrepareCreateFile(ZiFsTransaction* transaction,
   if (parent.file_type != ZI_FS_FILE_TYPE_DIRECTORY) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }
-  status = transaction->volume->device.read_blocks(transaction->volume->device.context,
-                                                   parent.directory_block,
-                                                   1,
-                                                   scratch,
-                                                   ZI_FS_BLOCK_SIZE);
-  if (ZiFailed(status)) {
-    return status;
-  }
   ZiFsDirectoryEntry existing_entry = {0};
-  status = ZiFsFindDirectoryEntry(scratch, ZI_FS_BLOCK_SIZE, request->name, &existing_entry);
+  uint64_t existing_block = 0;
+  status = ZiFsFindDirectoryEntryInRecord(transaction->volume,
+                                          &parent,
+                                          request->name,
+                                          scratch,
+                                          ZI_FS_BLOCK_SIZE,
+                                          &existing_entry,
+                                          &existing_block);
   if (ZiSucceeded(status)) {
     return ZI_STATUS_ALREADY_EXISTS;
   }
@@ -432,11 +470,7 @@ ZiStatus ZiFsTransactionPrepareCreateFile(ZiFsTransaction* transaction,
           : 1u + (((uint64_t)request->data.size - 1u) / (uint64_t)ZI_FS_BLOCK_SIZE);
   uint64_t first_data_block = 0;
   if (data_block_count != 0) {
-    status = find_free_extent(transaction->volume,
-                              data_block_count,
-                              scratch,
-                              ZI_FS_BLOCK_SIZE,
-                              &first_data_block);
+    status = find_free_extent(transaction, data_block_count, &first_data_block);
     if (ZiFailed(status)) {
       return status;
     }
@@ -476,22 +510,24 @@ ZiStatus ZiFsTransactionPrepareCreateFile(ZiFsTransaction* transaction,
     return transaction_fail(transaction, status);
   }
 
-  unsigned char* directory_data = NULL;
-  status = transaction_stage_existing_block(transaction, parent.directory_block, &directory_data);
-  if (ZiFailed(status)) {
-    return transaction_fail(transaction, status);
-  }
   ZiFsDirectoryEntry new_entry = {0};
   new_entry.file_id = file_id;
   new_entry.record_index = record_index;
   new_entry.file_type = ZI_FS_FILE_TYPE_REGULAR;
   new_entry.name = request->name;
-  status = ZiFsAddDirectoryEntry(directory_data, ZI_FS_BLOCK_SIZE, &new_entry);
+  uint64_t directory_block = 0;
+  bool directory_expanded = false;
+  status = stage_directory_entry(transaction,
+                                 &parent,
+                                 &new_entry,
+                                 &directory_block,
+                                 &directory_expanded);
   if (ZiFailed(status)) {
     return transaction_fail(transaction, status);
   }
-  status =
-      ZiFsSetDirectoryGeneration(directory_data, ZI_FS_BLOCK_SIZE, transaction->target_generation);
+  parent.modified_time = request->timestamp;
+  parent.changed_time = request->timestamp;
+  status = stage_changed_file_record(transaction, request->parent_record_index, &parent);
   if (ZiFailed(status)) {
     return transaction_fail(transaction, status);
   }
@@ -552,18 +588,15 @@ ZiStatus ZiFsTransactionPrepareMove(ZiFsTransaction* transaction,
   if (source_parent.file_type != ZI_FS_FILE_TYPE_DIRECTORY) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }
-  status = transaction->volume->device.read_blocks(transaction->volume->device.context,
-                                                   source_parent.directory_block,
-                                                   1,
-                                                   scratch,
-                                                   ZI_FS_BLOCK_SIZE);
-  if (ZiSucceeded(status)) {
-    status = ZiFsValidateDirectoryBlock(scratch, ZI_FS_BLOCK_SIZE, source_parent.file_id);
-  }
   ZiFsDirectoryEntry source_entry = {0};
-  if (ZiSucceeded(status)) {
-    status = ZiFsFindDirectoryEntry(scratch, ZI_FS_BLOCK_SIZE, request->source_name, &source_entry);
-  }
+  uint64_t source_directory_block = 0;
+  status = ZiFsFindDirectoryEntryInRecord(transaction->volume,
+                                          &source_parent,
+                                          request->source_name,
+                                          scratch,
+                                          ZI_FS_BLOCK_SIZE,
+                                          &source_entry,
+                                          &source_directory_block);
   if (ZiFailed(status)) {
     return status;
   }
@@ -593,21 +626,17 @@ ZiStatus ZiFsTransactionPrepareMove(ZiFsTransaction* transaction,
         source_parent.directory_block == target_parent.directory_block) {
       return ZI_STATUS_CORRUPT_FILESYSTEM;
     }
-    status = transaction->volume->device.read_blocks(transaction->volume->device.context,
-                                                     target_parent.directory_block,
-                                                     1,
-                                                     scratch,
-                                                     ZI_FS_BLOCK_SIZE);
-    if (ZiSucceeded(status)) {
-      status = ZiFsValidateDirectoryBlock(scratch, ZI_FS_BLOCK_SIZE, target_parent.file_id);
-    }
-    if (ZiFailed(status)) {
-      return status;
-    }
   }
 
   ZiFsDirectoryEntry collision = {0};
-  status = ZiFsFindDirectoryEntry(scratch, ZI_FS_BLOCK_SIZE, request->target_name, &collision);
+  uint64_t collision_block = 0;
+  status = ZiFsFindDirectoryEntryInRecord(transaction->volume,
+                                          &target_parent,
+                                          request->target_name,
+                                          scratch,
+                                          ZI_FS_BLOCK_SIZE,
+                                          &collision,
+                                          &collision_block);
   if (ZiSucceeded(status)) {
     return ZI_STATUS_ALREADY_EXISTS;
   }
@@ -641,20 +670,12 @@ ZiStatus ZiFsTransactionPrepareMove(ZiFsTransaction* transaction,
     }
   }
 
-  unsigned char* source_directory = NULL;
-  status = transaction_stage_existing_block(transaction,
-                                            source_parent.directory_block,
-                                            &source_directory);
-  if (ZiSucceeded(status)) {
-    status = ZiFsValidateDirectoryBlock(source_directory, ZI_FS_BLOCK_SIZE, source_parent.file_id);
-  }
   ZiFsDirectoryEntry removed_entry = {0};
-  if (ZiSucceeded(status)) {
-    status = ZiFsRemoveDirectoryEntry(source_directory,
-                                      ZI_FS_BLOCK_SIZE,
-                                      request->source_name,
-                                      &removed_entry);
-  }
+  status = stage_directory_removal(transaction,
+                                   &source_parent,
+                                   source_directory_block,
+                                   request->source_name,
+                                   &removed_entry);
   if (ZiFailed(status)) {
     return transaction_fail(transaction, status);
   }
@@ -667,28 +688,30 @@ ZiStatus ZiFsTransactionPrepareMove(ZiFsTransaction* transaction,
 
   ZiFsDirectoryEntry target_entry = removed_entry;
   target_entry.name = request->target_name;
-  unsigned char* target_directory = source_directory;
-  if (!same_parent) {
-    status = transaction_stage_existing_block(transaction,
-                                              target_parent.directory_block,
-                                              &target_directory);
-    if (ZiSucceeded(status)) {
-      status =
-          ZiFsValidateDirectoryBlock(target_directory, ZI_FS_BLOCK_SIZE, target_parent.file_id);
-    }
+  ZiFsFileRecord* destination_parent = &target_parent;
+  if (same_parent) {
+    destination_parent = &source_parent;
   }
-  if (ZiSucceeded(status)) {
-    status = ZiFsAddDirectoryEntry(target_directory, ZI_FS_BLOCK_SIZE, &target_entry);
+  uint64_t target_directory_block = 0;
+  bool target_expanded = false;
+  status = stage_directory_entry(transaction,
+                                 destination_parent,
+                                 &target_entry,
+                                 &target_directory_block,
+                                 &target_expanded);
+  if (ZiFailed(status)) {
+    return transaction_fail(transaction, status);
   }
-  if (ZiSucceeded(status)) {
-    status = ZiFsSetDirectoryGeneration(source_directory,
-                                        ZI_FS_BLOCK_SIZE,
-                                        transaction->target_generation);
-  }
+
+  source_parent.modified_time = request->timestamp;
+  source_parent.changed_time = request->timestamp;
+  status =
+      stage_changed_file_record(transaction, request->source_parent_record_index, &source_parent);
   if (ZiSucceeded(status) && !same_parent) {
-    status = ZiFsSetDirectoryGeneration(target_directory,
-                                        ZI_FS_BLOCK_SIZE,
-                                        transaction->target_generation);
+    target_parent.modified_time = request->timestamp;
+    target_parent.changed_time = request->timestamp;
+    status =
+        stage_changed_file_record(transaction, request->target_parent_record_index, &target_parent);
   }
   if (ZiFailed(status)) {
     return transaction_fail(transaction, status);
@@ -833,6 +856,132 @@ ZiStatus ZiFsTransactionPrepareTruncate(ZiFsTransaction* transaction,
   return ZI_STATUS_SUCCESS;
 }
 
+// A write may overwrite allocated bytes or grow one bounded inline-extent record atomically.
+// NOLINTNEXTLINE(readability-function-size, readability-function-cognitive-complexity)
+ZiStatus ZiFsTransactionPrepareWrite(ZiFsTransaction* transaction,
+                                     const ZiFsWriteRequest* request,
+                                     ZiFsWriteResult* out_result) {
+  if (!transaction_is_valid(transaction) || request == NULL || out_result == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  zi_memory_zero(out_result, sizeof *out_result);
+  if (transaction->state != ZI_FS_TRANSACTION_STATE_READY || transaction->block_image_count != 0 ||
+      transaction->deferred_extent_count != 0) {
+    return ZI_STATUS_INVALID_STATE;
+  }
+  ZiStatus status = validate_write_request(request);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  if ((uint64_t)request->data.size > UINT64_MAX - request->offset) {
+    return ZI_STATUS_OUT_OF_BOUNDS;
+  }
+
+  unsigned char* scratch = transaction_scratch(transaction);
+  ZiFsFileRecord record = {0};
+  status = ZiFsReadFileRecord(transaction->volume,
+                              request->record_index,
+                              scratch,
+                              ZI_FS_BLOCK_SIZE,
+                              &record);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  if (request->record_index == transaction->volume->superblock.root_record_index ||
+      record.file_type != ZI_FS_FILE_TYPE_REGULAR) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  if (request->offset > record.file_size) {
+    return ZI_STATUS_NOT_IMPLEMENTED;
+  }
+  status = validate_extent_ownership(transaction->volume,
+                                     request->record_index,
+                                     &record,
+                                     scratch,
+                                     ZI_FS_BLOCK_SIZE);
+  if (ZiFailed(status)) {
+    return status;
+  }
+
+  uint64_t write_end = request->offset + (uint64_t)request->data.size;
+  uint64_t new_size = write_end > record.file_size ? write_end : record.file_size;
+  uint64_t existing_blocks = record.allocated_size >> ZI_FS_BLOCK_SHIFT;
+  uint64_t required_blocks = 1u + ((new_size - 1u) >> ZI_FS_BLOCK_SHIFT);
+  if (required_blocks < existing_blocks) {
+    return ZI_STATUS_CORRUPT_FILESYSTEM;
+  }
+  uint64_t allocated_blocks = required_blocks - existing_blocks;
+  ZiFsFileRecord changed = record;
+  uint64_t first_new_block = 0;
+  if (allocated_blocks != 0) {
+    status = find_append_extent(transaction, &record, allocated_blocks, &first_new_block);
+    if (ZiFailed(status)) {
+      return status;
+    }
+    status = append_record_extent(&changed, existing_blocks, first_new_block, allocated_blocks);
+    if (ZiFailed(status)) {
+      return status;
+    }
+    if (required_blocks > (UINT64_MAX >> ZI_FS_BLOCK_SHIFT)) {
+      return ZI_STATUS_OUT_OF_BOUNDS;
+    }
+    changed.allocated_size = required_blocks << ZI_FS_BLOCK_SHIFT;
+    status = stage_extent_allocation(transaction, first_new_block, allocated_blocks);
+    if (ZiFailed(status)) {
+      return transaction_fail(transaction, status);
+    }
+  }
+
+  size_t copied = 0;
+  uint64_t current_offset = request->offset;
+  while (copied < request->data.size) {
+    uint64_t logical_block = current_offset >> ZI_FS_BLOCK_SHIFT;
+    size_t block_offset = (size_t)(current_offset & (ZI_FS_BLOCK_SIZE - 1u));
+    uint64_t physical_block = 0;
+    status = record_physical_block(&changed, logical_block, &physical_block);
+    if (ZiFailed(status)) {
+      return transaction_fail(transaction, status);
+    }
+    unsigned char* block_data = NULL;
+    if (logical_block < existing_blocks) {
+      status = transaction_stage_existing_block(transaction, physical_block, &block_data);
+    } else {
+      status = transaction_stage_empty_block(transaction, physical_block, &block_data);
+    }
+    if (ZiFailed(status)) {
+      return transaction_fail(transaction, status);
+    }
+    size_t copy_size = request->data.size - copied;
+    if (copy_size > ZI_FS_BLOCK_SIZE - block_offset) {
+      copy_size = ZI_FS_BLOCK_SIZE - block_offset;
+    }
+    zi_memory_copy(block_data + block_offset,
+                   (const unsigned char*)request->data.data + copied,
+                   copy_size);
+    copied += copy_size;
+    current_offset += copy_size;
+  }
+
+  changed.file_size = new_size;
+  changed.modified_time = request->timestamp;
+  changed.changed_time = request->timestamp;
+  status = stage_changed_file_record(transaction, request->record_index, &changed);
+  if (ZiFailed(status)) {
+    return transaction_fail(transaction, status);
+  }
+
+  transaction->state = ZI_FS_TRANSACTION_STATE_PREPARED;
+  out_result->struct_size = sizeof *out_result;
+  out_result->version = ZI_FS_WRITE_RESULT_VERSION;
+  out_result->file_id = record.file_id;
+  out_result->record_index = request->record_index;
+  out_result->previous_size = record.file_size;
+  out_result->new_size = new_size;
+  out_result->bytes_written = request->data.size;
+  out_result->allocated_block_count = allocated_blocks;
+  return ZI_STATUS_SUCCESS;
+}
+
 // Deletion removes the exact directory link and record before staging allocation release.
 // NOLINTNEXTLINE(readability-function-size, readability-function-cognitive-complexity)
 ZiStatus ZiFsTransactionPrepareDelete(ZiFsTransaction* transaction,
@@ -864,18 +1013,15 @@ ZiStatus ZiFsTransactionPrepareDelete(ZiFsTransaction* transaction,
   if (parent.file_type != ZI_FS_FILE_TYPE_DIRECTORY) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }
-  status = transaction->volume->device.read_blocks(transaction->volume->device.context,
-                                                   parent.directory_block,
-                                                   1,
-                                                   scratch,
-                                                   ZI_FS_BLOCK_SIZE);
-  if (ZiSucceeded(status)) {
-    status = ZiFsValidateDirectoryBlock(scratch, ZI_FS_BLOCK_SIZE, parent.file_id);
-  }
   ZiFsDirectoryEntry entry = {0};
-  if (ZiSucceeded(status)) {
-    status = ZiFsFindDirectoryEntry(scratch, ZI_FS_BLOCK_SIZE, request->name, &entry);
-  }
+  uint64_t directory_block = 0;
+  status = ZiFsFindDirectoryEntryInRecord(transaction->volume,
+                                          &parent,
+                                          request->name,
+                                          scratch,
+                                          ZI_FS_BLOCK_SIZE,
+                                          &entry,
+                                          &directory_block);
   if (ZiFailed(status)) {
     return status;
   }
@@ -909,20 +1055,8 @@ ZiStatus ZiFsTransactionPrepareDelete(ZiFsTransaction* transaction,
     return status;
   }
 
-  unsigned char* directory_data = NULL;
-  status = transaction_stage_existing_block(transaction, parent.directory_block, &directory_data);
-  if (ZiSucceeded(status)) {
-    status = ZiFsValidateDirectoryBlock(directory_data, ZI_FS_BLOCK_SIZE, parent.file_id);
-  }
   ZiFsDirectoryEntry removed = {0};
-  if (ZiSucceeded(status)) {
-    status = ZiFsRemoveDirectoryEntry(directory_data, ZI_FS_BLOCK_SIZE, request->name, &removed);
-  }
-  if (ZiSucceeded(status)) {
-    status = ZiFsSetDirectoryGeneration(directory_data,
-                                        ZI_FS_BLOCK_SIZE,
-                                        transaction->target_generation);
-  }
+  status = stage_directory_removal(transaction, &parent, directory_block, request->name, &removed);
   if (ZiFailed(status)) {
     return transaction_fail(transaction, status);
   }
@@ -1047,6 +1181,42 @@ static unsigned char* transaction_image_data(const ZiFsTransaction* transaction,
          ((image_index + ZI_FS_TRANSACTION_SCRATCH_BLOCKS) * (size_t)ZI_FS_BLOCK_SIZE);
 }
 
+static const unsigned char* transaction_staged_block(const ZiFsTransaction* transaction,
+                                                     uint64_t target_block) {
+  for (size_t index = 0; index < transaction->block_image_count; ++index) {
+    if (transaction->block_images[index].target_block == target_block) {
+      return transaction_image_data(transaction, index);
+    }
+  }
+  return NULL;
+}
+
+static ZiStatus transaction_read_block_view(const ZiFsTransaction* transaction,
+                                            uint64_t target_block,
+                                            void* scratch,
+                                            size_t scratch_size,
+                                            const unsigned char** out_data) {
+  if (transaction == NULL || transaction->volume == NULL || scratch == NULL ||
+      scratch_size < ZI_FS_BLOCK_SIZE || out_data == NULL ||
+      target_block >= transaction->volume->superblock.total_blocks) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  const unsigned char* staged = transaction_staged_block(transaction, target_block);
+  if (staged != NULL) {
+    *out_data = staged;
+    return ZI_STATUS_SUCCESS;
+  }
+  ZiStatus status = transaction->volume->device.read_blocks(transaction->volume->device.context,
+                                                            target_block,
+                                                            1,
+                                                            scratch,
+                                                            scratch_size);
+  if (ZiSucceeded(status)) {
+    *out_data = scratch;
+  }
+  return status;
+}
+
 static ZiStatus transaction_stage_existing_block(ZiFsTransaction* transaction,
                                                  uint64_t target_block,
                                                  unsigned char** out_data) {
@@ -1143,6 +1313,17 @@ static ZiStatus validate_delete_request(const ZiFsDeleteRequest* request) {
   return validate_transaction_name(request->name);
 }
 
+static ZiStatus validate_write_request(const ZiFsWriteRequest* request) {
+  if (request->struct_size < sizeof *request || request->version != ZI_FS_WRITE_REQUEST_VERSION ||
+      request->flags != ZI_FS_WRITE_FLAG_NONE || request->reserved != 0 ||
+      request->data.data == NULL || request->data.size == 0 ||
+      request->data.size >
+          (size_t)ZI_FS_TRANSACTION_MAXIMUM_DATA_BLOCKS * (size_t)ZI_FS_BLOCK_SIZE) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  return ZI_STATUS_SUCCESS;
+}
+
 static ZiStatus validate_transaction_name(ZiStringView name) {
   if (name.data == NULL || name.size == 0 || name.size > ZI_FS_MAX_DIRECTORY_NAME_BYTES) {
     return ZI_STATUS_INVALID_ARGUMENT;
@@ -1161,6 +1342,189 @@ static ZiStatus validate_transaction_name(ZiStringView name) {
     }
   }
   return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus find_directory_insertion_block(ZiFsTransaction* transaction,
+                                               const ZiFsFileRecord* directory,
+                                               const ZiFsDirectoryEntry* entry,
+                                               uint64_t* out_block) {
+  if (transaction == NULL || directory == NULL || entry == NULL || out_block == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  uint64_t block_count = 0;
+  ZiStatus status = ZiFsDirectoryBlockCount(transaction->volume, directory, &block_count);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  unsigned char* scratch = transaction_scratch(transaction);
+  for (uint64_t logical_block = 0; logical_block < block_count; ++logical_block) {
+    uint64_t physical_block = 0;
+    status = ZiFsDirectoryBlockAt(transaction->volume, directory, logical_block, &physical_block);
+    const unsigned char* data = NULL;
+    if (ZiSucceeded(status)) {
+      status = transaction_read_block_view(transaction,
+                                           physical_block,
+                                           scratch,
+                                           ZI_FS_BLOCK_SIZE,
+                                           &data);
+    }
+    if (ZiSucceeded(status)) {
+      status = ZiFsValidateDirectoryBlock(data, ZI_FS_BLOCK_SIZE, directory->file_id);
+    }
+    bool can_add = false;
+    if (ZiSucceeded(status)) {
+      status = ZiFsCanAddDirectoryEntry(data, ZI_FS_BLOCK_SIZE, entry, &can_add);
+    }
+    if (status == ZI_STATUS_ALREADY_EXISTS) {
+      return status;
+    }
+    if (ZiFailed(status)) {
+      return status;
+    }
+    if (can_add) {
+      *out_block = physical_block;
+      return ZI_STATUS_SUCCESS;
+    }
+  }
+  return ZI_STATUS_BUFFER_TOO_SMALL;
+}
+
+static ZiStatus stage_new_directory_block(ZiFsTransaction* transaction,
+                                          ZiFsFileRecord* directory,
+                                          const ZiFsDirectoryEntry* entry,
+                                          uint64_t* out_block) {
+  if ((transaction->volume->superblock.incompatible_features &
+       ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1) == 0) {
+    return ZI_STATUS_BUFFER_TOO_SMALL;
+  }
+  uint64_t directory_block_count = 0;
+  ZiStatus status = ZiFsDirectoryBlockCount(transaction->volume, directory, &directory_block_count);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  if (directory_block_count >= ZI_FS_MAX_DIRECTORY_BLOCKS) {
+    return ZI_STATUS_BUFFER_TOO_SMALL;
+  }
+
+  uint64_t target_block = 0;
+  status = find_append_extent(transaction, directory, 1, &target_block);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  status = append_record_extent(directory, directory_block_count, target_block, 1);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  if (directory->allocated_size > UINT64_MAX - ZI_FS_BLOCK_SIZE) {
+    return ZI_STATUS_OUT_OF_BOUNDS;
+  }
+  directory->allocated_size += ZI_FS_BLOCK_SIZE;
+
+  status = stage_extent_allocation(transaction, target_block, 1);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  unsigned char* directory_data = NULL;
+  status = transaction_stage_empty_block(transaction, target_block, &directory_data);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  status = ZiFsInitialiseDirectoryBlock(directory_data,
+                                        ZI_FS_BLOCK_SIZE,
+                                        directory->file_id,
+                                        transaction->target_generation);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  status = ZiFsAddDirectoryEntry(directory_data, ZI_FS_BLOCK_SIZE, entry);
+  if (ZiSucceeded(status)) {
+    *out_block = target_block;
+  }
+  return status;
+}
+
+static ZiStatus stage_directory_entry(ZiFsTransaction* transaction,
+                                      ZiFsFileRecord* directory,
+                                      const ZiFsDirectoryEntry* entry,
+                                      uint64_t* out_block,
+                                      bool* out_expanded) {
+  if (transaction == NULL || directory == NULL || entry == NULL || out_block == NULL ||
+      out_expanded == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  *out_expanded = false;
+  uint64_t target_block = 0;
+  ZiStatus status = find_directory_insertion_block(transaction, directory, entry, &target_block);
+  if (status == ZI_STATUS_BUFFER_TOO_SMALL) {
+    status = stage_new_directory_block(transaction, directory, entry, out_block);
+    if (ZiSucceeded(status)) {
+      *out_expanded = true;
+    }
+    return status;
+  }
+  if (ZiFailed(status)) {
+    return status;
+  }
+
+  unsigned char* directory_data = NULL;
+  status = transaction_stage_existing_block(transaction, target_block, &directory_data);
+  if (ZiSucceeded(status)) {
+    status = ZiFsValidateDirectoryBlock(directory_data, ZI_FS_BLOCK_SIZE, directory->file_id);
+  }
+  if (ZiSucceeded(status)) {
+    status = ZiFsAddDirectoryEntry(directory_data, ZI_FS_BLOCK_SIZE, entry);
+  }
+  if (ZiSucceeded(status)) {
+    status = ZiFsSetDirectoryGeneration(directory_data,
+                                        ZI_FS_BLOCK_SIZE,
+                                        transaction->target_generation);
+  }
+  if (ZiSucceeded(status)) {
+    *out_block = target_block;
+  }
+  return status;
+}
+
+static ZiStatus stage_directory_removal(ZiFsTransaction* transaction,
+                                        const ZiFsFileRecord* directory,
+                                        uint64_t directory_block,
+                                        ZiStringView name,
+                                        ZiFsDirectoryEntry* out_entry) {
+  if (transaction == NULL || directory == NULL || out_entry == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  uint64_t block_count = 0;
+  ZiStatus status = ZiFsDirectoryBlockCount(transaction->volume, directory, &block_count);
+  bool block_belongs_to_directory = false;
+  for (uint64_t logical_block = 0; ZiSucceeded(status) && logical_block < block_count;
+       ++logical_block) {
+    uint64_t candidate = 0;
+    status = ZiFsDirectoryBlockAt(transaction->volume, directory, logical_block, &candidate);
+    if (ZiSucceeded(status) && candidate == directory_block) {
+      block_belongs_to_directory = true;
+      break;
+    }
+  }
+  if (ZiFailed(status)) {
+    return status;
+  }
+  if (!block_belongs_to_directory) {
+    return ZI_STATUS_CORRUPT_FILESYSTEM;
+  }
+  unsigned char* directory_data = NULL;
+  status = transaction_stage_existing_block(transaction, directory_block, &directory_data);
+  if (ZiSucceeded(status)) {
+    status = ZiFsValidateDirectoryBlock(directory_data, ZI_FS_BLOCK_SIZE, directory->file_id);
+  }
+  if (ZiSucceeded(status)) {
+    status = ZiFsRemoveDirectoryEntry(directory_data, ZI_FS_BLOCK_SIZE, name, out_entry);
+  }
+  if (ZiSucceeded(status)) {
+    status = ZiFsSetDirectoryGeneration(directory_data,
+                                        ZI_FS_BLOCK_SIZE,
+                                        transaction->target_generation);
+  }
+  return status;
 }
 
 static ZiStatus find_record_by_file_id(const ZiFsVolume* volume,
@@ -1343,17 +1707,18 @@ static ZiStatus find_free_record(const ZiFsVolume* volume,
   return ZI_STATUS_SUCCESS;
 }
 
-static ZiStatus find_free_extent(const ZiFsVolume* volume,
+static ZiStatus find_free_extent(const ZiFsTransaction* transaction,
                                  uint64_t requested_blocks,
-                                 void* scratch,
-                                 size_t scratch_size,
                                  uint64_t* out_first_block) {
-  if (volume == NULL || requested_blocks == 0 || scratch == NULL ||
-      scratch_size < ZI_FS_BLOCK_SIZE || out_first_block == NULL) {
+  if (transaction == NULL || transaction->volume == NULL || requested_blocks == 0 ||
+      out_first_block == NULL) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }
+  const ZiFsVolume* volume = transaction->volume;
+  unsigned char* scratch = transaction_scratch(transaction);
   const uint64_t bits_per_bitmap_block = (uint64_t)ZI_FS_BLOCK_SIZE * 8u;
   uint64_t loaded_bitmap_block = UINT64_MAX;
+  const unsigned char* bitmap_data = NULL;
   uint64_t run_start = 0;
   uint64_t run_size = 0;
   for (uint64_t block = 0; block < volume->superblock.total_blocks; ++block) {
@@ -1367,18 +1732,18 @@ static ZiStatus find_free_extent(const ZiFsVolume* volume,
     }
     if (bitmap_block != loaded_bitmap_block) {
       ZiStatus status =
-          volume->device.read_blocks(volume->device.context,
-                                     volume->superblock.allocation_bitmap_start + bitmap_block,
-                                     1,
-                                     scratch,
-                                     scratch_size);
+          transaction_read_block_view(transaction,
+                                      volume->superblock.allocation_bitmap_start + bitmap_block,
+                                      scratch,
+                                      ZI_FS_BLOCK_SIZE,
+                                      &bitmap_data);
       if (ZiFailed(status)) {
         return status;
       }
       loaded_bitmap_block = bitmap_block;
     }
     bool allocated = false;
-    ZiStatus status = ZiFsAllocationBitQuery(scratch,
+    ZiStatus status = ZiFsAllocationBitQuery(bitmap_data,
                                              ZI_FS_BLOCK_SIZE,
                                              block % bits_per_bitmap_block,
                                              &allocated);
@@ -1399,6 +1764,136 @@ static ZiStatus find_free_extent(const ZiFsVolume* volume,
     }
   }
   return ZI_STATUS_VOLUME_FULL;
+}
+
+static ZiStatus find_append_extent(const ZiFsTransaction* transaction,
+                                   const ZiFsFileRecord* record,
+                                   uint64_t requested_blocks,
+                                   uint64_t* out_first_block) {
+  if (transaction == NULL || record == NULL || requested_blocks == 0 || out_first_block == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  if (record->extent_count != 0) {
+    const ZiFsExtent* final_extent = &record->extents[record->extent_count - 1u];
+    if (final_extent->physical_block <= UINT64_MAX - final_extent->block_count) {
+      uint64_t preferred_block = final_extent->physical_block + final_extent->block_count;
+      bool preferred_is_free = false;
+      ZiStatus status =
+          range_is_free(transaction, preferred_block, requested_blocks, &preferred_is_free);
+      if (ZiFailed(status)) {
+        return status;
+      }
+      if (preferred_is_free) {
+        *out_first_block = preferred_block;
+        return ZI_STATUS_SUCCESS;
+      }
+    }
+  }
+  return find_free_extent(transaction, requested_blocks, out_first_block);
+}
+
+static ZiStatus range_is_free(const ZiFsTransaction* transaction,
+                              uint64_t first_block,
+                              uint64_t block_count,
+                              bool* out_is_free) {
+  if (transaction == NULL || transaction->volume == NULL || block_count == 0 ||
+      out_is_free == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  *out_is_free = false;
+  const ZiFsVolume* volume = transaction->volume;
+  if (first_block >= volume->superblock.total_blocks ||
+      block_count > volume->superblock.total_blocks - first_block) {
+    return ZI_STATUS_SUCCESS;
+  }
+  const uint64_t bits_per_bitmap_block = (uint64_t)ZI_FS_BLOCK_SIZE * 8u;
+  uint64_t loaded_bitmap_block = UINT64_MAX;
+  const unsigned char* bitmap_data = NULL;
+  unsigned char* scratch = transaction_scratch(transaction);
+  for (uint64_t offset = 0; offset < block_count; ++offset) {
+    uint64_t block = first_block + offset;
+    if (block_is_metadata(&volume->superblock, block)) {
+      return ZI_STATUS_SUCCESS;
+    }
+    uint64_t bitmap_block = block / bits_per_bitmap_block;
+    if (bitmap_block >= volume->superblock.allocation_bitmap_blocks) {
+      return ZI_STATUS_CORRUPT_FILESYSTEM;
+    }
+    if (bitmap_block != loaded_bitmap_block) {
+      ZiStatus status =
+          transaction_read_block_view(transaction,
+                                      volume->superblock.allocation_bitmap_start + bitmap_block,
+                                      scratch,
+                                      ZI_FS_BLOCK_SIZE,
+                                      &bitmap_data);
+      if (ZiFailed(status)) {
+        return status;
+      }
+      loaded_bitmap_block = bitmap_block;
+    }
+    bool allocated = false;
+    ZiStatus status = ZiFsAllocationBitQuery(bitmap_data,
+                                             ZI_FS_BLOCK_SIZE,
+                                             block % bits_per_bitmap_block,
+                                             &allocated);
+    if (ZiFailed(status)) {
+      return ZI_STATUS_CORRUPT_FILESYSTEM;
+    }
+    if (allocated) {
+      return ZI_STATUS_SUCCESS;
+    }
+  }
+  *out_is_free = true;
+  return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus append_record_extent(ZiFsFileRecord* record,
+                                     uint64_t logical_block,
+                                     uint64_t physical_block,
+                                     uint64_t block_count) {
+  if (record == NULL || block_count == 0 || block_count - 1u > UINT64_MAX - logical_block ||
+      block_count - 1u > UINT64_MAX - physical_block) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  if (record->extent_count != 0) {
+    ZiFsExtent* final_extent = &record->extents[record->extent_count - 1u];
+    if (final_extent->logical_block <= UINT64_MAX - final_extent->block_count &&
+        final_extent->physical_block <= UINT64_MAX - final_extent->block_count &&
+        final_extent->logical_block + final_extent->block_count == logical_block &&
+        final_extent->physical_block + final_extent->block_count == physical_block) {
+      if (final_extent->block_count > UINT64_MAX - block_count) {
+        return ZI_STATUS_OUT_OF_BOUNDS;
+      }
+      final_extent->block_count += block_count;
+      return ZI_STATUS_SUCCESS;
+    }
+  }
+  if (record->extent_count >= ZI_FS_INLINE_EXTENT_COUNT) {
+    return ZI_STATUS_BUFFER_TOO_SMALL;
+  }
+  ZiFsExtent* extent = &record->extents[record->extent_count];
+  extent->logical_block = logical_block;
+  extent->physical_block = physical_block;
+  extent->block_count = block_count;
+  ++record->extent_count;
+  return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus record_physical_block(const ZiFsFileRecord* record,
+                                      uint64_t logical_block,
+                                      uint64_t* out_physical_block) {
+  if (record == NULL || out_physical_block == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  for (size_t index = 0; index < record->extent_count; ++index) {
+    const ZiFsExtent* extent = &record->extents[index];
+    if (logical_block >= extent->logical_block &&
+        logical_block - extent->logical_block < extent->block_count) {
+      *out_physical_block = extent->physical_block + (logical_block - extent->logical_block);
+      return ZI_STATUS_SUCCESS;
+    }
+  }
+  return ZI_STATUS_CORRUPT_FILESYSTEM;
 }
 
 static ZiStatus
@@ -1561,7 +2056,7 @@ static ZiStatus validate_owner_record_candidate(uint64_t owner_record_index,
   if (candidate->file_id == owner_record->file_id) {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
   }
-  if (candidate->file_type != ZI_FS_FILE_TYPE_REGULAR) {
+  if (candidate->extent_count == 0) {
     return ZI_STATUS_SUCCESS;
   }
   for (size_t owner_extent = 0; owner_extent < owner_record->extent_count; ++owner_extent) {

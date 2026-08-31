@@ -307,6 +307,8 @@ print_report(const char* path, const InspectionSource* source, const ZiFsInspect
            (unsigned long long)report->superblock.generation,
            report->superblock.state_flags == 0 ? ", clean" : ", dirty");
     printf("  Blocks: %llu total\n", (unsigned long long)report->superblock.total_blocks);
+    printf("  Journal header 0: %s\n", status_name(report->journal_header_status[0]));
+    printf("  Journal header 1: %s\n", status_name(report->journal_header_status[1]));
     printf("  Journal: copy %u, sequence %llu, head %llu, tail %llu, %llu occupied\n",
            report->selected_journal_copy,
            (unsigned long long)report->journal.header_sequence,
@@ -318,6 +320,9 @@ print_report(const char* path, const InspectionSource* source, const ZiFsInspect
            (unsigned long long)report->journal_block_images,
            (unsigned long long)report->journal_commit_records,
            (unsigned long long)report->journal_checkpoint_records);
+    printf("  Metadata view: %s\n",
+           report->inspected_replay_view != 0 ? "validated journal replay overlay"
+                                              : "on-disk home blocks");
     printf("  Security: %llu descriptors, %llu ACEs\n",
            (unsigned long long)report->security_descriptor_count,
            (unsigned long long)report->security_ace_count);

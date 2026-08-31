@@ -1,12 +1,12 @@
 # Zizium
 
-Zizium is an experimental operating system which is native to PE/COFF and is case sensitive.
-It was designed to be UEFI-first and non-POSIX, and makes use of a modular monolithic kernel.
+Zizium is an experimental PE/COFF-native, case-sensitive operating system. It is
+UEFI-first and non-POSIX by design, with a modular monolithic kernel.
 The present milestone is **Zizium 0.2 "Luma"**.
 
-This repository serves as a foundation and is not a daily-use operating system. As for the boot
-slice, host tests, and implemented algorithms are identified separately from
-Interfaces that merely set aside a future architecture.
+This repository is a foundation, not a daily-use operating system. Booted
+vertical slices and host-tested algorithms are identified separately from
+interfaces which reserve future architecture.
 
 ## Current vertical slice
 
@@ -27,15 +27,22 @@ Interfaces that merely set aside a future architecture.
   explicit read-only recovery/development fallback only;
 - bounded NVMe/partition writes and flushes, scalable ZiFS allocation maps,
   full-block write-ahead records, caller-owned staging for up to 28 home-block
-  images, one atomic regular-file create operation with up to 24 data blocks,
-  atomic no-replacement same-directory rename/cross-directory move,
-  shrink-only regular-file truncation, and regular-file deletion with
-  checkpoint-gated extent reuse; circular-journal reclamation and automatic
-  rollback/replay/repair are validated at every host write/flush boundary and
-  across twenty-five QEMU boots;
+  images, atomic regular-file creation and bounded non-sparse overwrite/growth
+  with up to 24 data blocks per request, atomic no-replacement
+  same-directory rename/cross-directory move, shrink-only regular-file
+  truncation, and regular-file deletion with checkpoint-gated extent reuse;
+  an incompatible feature bit enables exact-case directories of up to 256
+  blocks through inline continuation extents; circular-journal reclamation and
+  automatic rollback/replay are validated at every relevant host write/flush
+  boundary and across twenty-seven QEMU boots;
 - versioned, checksummed ZiFS security descriptors with durable owner, primary
   group, ordered DACL, and ACE data; mount validates every live security
   reference and a negative QEMU boot proves corrupted policy cannot be used;
+- a strictly read-only `zifsinspect.exe` for raw volumes and GPT images. It
+  reports both superblocks and journal headers, validates committed in-flight
+  state through a memory-only replay overlay, walks security and namespace
+  metadata, reconciles allocation, and is covered by eleven non-mutation
+  fixtures plus clean and crash-boundary QEMU checkpoints;
 - populated ZiFS regular files with bounded extent reads; core DLLs,
   programmes, drivers, and manifests come from ZiFS rather than Limine PE
   modules;
@@ -68,12 +75,14 @@ Interfaces that merely set aside a future architecture.
 - strict UTF-8 and case-sensitive Windows-style paths;
 - tested ACL, scheduler queue, object, PE, terminal, and display primitives;
 - an early, deliberately limited Luma command loop retained only for explicit
-  Recovery is achieved through the bounded user-mode Luma slice, which is the standard boot interface.
+  recovery; the bounded filesystem-backed user-mode Luma slice is the normal
+  boot interface.
 
 ## Build
 
-The primary supported host is Windows 11 x64 with PowerShell 7, GNU Make,
-The linkers included are Clang/LLVM, the Microsoft linker, together with NASM, Python, QEMU, and EDK2 firmware.
+The primary supported host is Windows 11 x64 with PowerShell 7 and GNU Make.
+The toolchain uses Clang/LLVM, the Microsoft linker, NASM, Python, QEMU, and
+EDK2 firmware.
 
 ```powershell
 make deps
@@ -91,25 +100,22 @@ make run
 ```
 
 `make intel` builds an optional Intel-compiler validation variant when `icx`
-It is installed; however, it is not the default build and provides no hardware-vendor
+is installed; it is not the default build and provides no hardware-vendor
 endorsement.
 
-The dependency fetch is explicit, unlike normal compilation, which never downloads files.
+Dependency fetching is explicit; normal compilation never downloads files.
 
 ## Design invariants
 
 - PE/COFF is the native executable format; ELF is not one of Zizium's formats.
 - ZiFS is the native root filesystem; FAT32 is used only for the EFI System
   Partition.
-- When it comes to paths and object names, case sensitivity is observed.
-main is the usual entry point for a C program; zizium.h and ZIA are optional.
-Where it is natural, the English language and identifiers owned by the project use British spelling.
+- Paths and object names are case-sensitive.
+- `main` is the normal entry point for a C programme; `zizium.h` and ZIA are
+  optional.
+- Project-owned English and identifiers use British spelling where natural.
 
 ## Licence
 
-The work owned by Zizium is under GPL-3.0 or later, and third-party notices are recorded in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-## Pronunciation
-
-Many people say Zizium wrong; it is pronounced as "Caesium"
+Zizium-owned work is licensed under GPL-3.0-or-later. Third-party notices are
+recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

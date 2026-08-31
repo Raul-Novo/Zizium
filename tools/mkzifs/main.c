@@ -31,6 +31,8 @@ typedef struct DirectoryNode {
   uint64_t file_id;
   uint64_t record_index;
   uint64_t directory_block;
+  uint64_t continuation_block;
+  uint64_t continuation_block_count;
 } DirectoryNode;
 
 typedef struct InputFile {
@@ -165,6 +167,31 @@ static ZiStatus initialise_input_files(InputFile* input_files,
                                        uint64_t first_data_block,
                                        uint64_t backup_superblock,
                                        uint64_t* out_next_data_block);
+static ZiStatus assign_directory_continuations(DirectoryNode* nodes,
+                                               size_t node_count,
+                                               const InputFile* input_files,
+                                               size_t input_file_count,
+                                               uint64_t first_continuation_block,
+                                               uint64_t backup_superblock,
+                                               uint64_t* out_first_data_block);
+static ZiStatus account_child_directories(const DirectoryNode* nodes,
+                                          size_t node_count,
+                                          size_t parent_index,
+                                          size_t* used_bytes,
+                                          uint64_t* block_count);
+static ZiStatus account_child_files(const InputFile* input_files,
+                                    size_t input_file_count,
+                                    size_t parent_index,
+                                    size_t* used_bytes,
+                                    uint64_t* block_count);
+static ZiStatus
+account_directory_entry(size_t name_size, size_t* used_bytes, uint64_t* block_count);
+static ZiStatus append_directory_entry(FILE* volume,
+                                       const DirectoryNode* node,
+                                       ZiFsDirectoryEntry* entry,
+                                       unsigned char* block,
+                                       uint64_t* logical_block);
+static uint64_t directory_physical_block(const DirectoryNode* node, uint64_t logical_block);
 static ZiStatus query_file_size(const char* path, uint64_t* out_size);
 static ZiStatus write_input_file(FILE* volume, const InputFile* input_file);
 static ZiStatus write_at_block(FILE* file, uint64_t block_number, const void* block);
@@ -235,15 +262,36 @@ static int format_volume(const char* path,
     fputs("The built-in ZiFS directory layout is invalid.\n", stderr);
     return 1;
   }
-  uint64_t next_data_block = directory_start + directory_blocks;
+  uint64_t relative_data_blocks = 0;
   status = initialise_input_files(input_files,
                                   input_file_count,
                                   nodes,
                                   node_count,
-                                  next_data_block,
+                                  0,
                                   backup_superblock,
-                                  &next_data_block);
+                                  &relative_data_blocks);
+  uint64_t first_data_block = 0;
+  if (ZiSucceeded(status)) {
+    status = assign_directory_continuations(nodes,
+                                            node_count,
+                                            input_files,
+                                            input_file_count,
+                                            directory_start + directory_blocks,
+                                            backup_superblock,
+                                            &first_data_block);
+  }
+  if (ZiSucceeded(status) && relative_data_blocks > backup_superblock - first_data_block) {
+    status = ZI_STATUS_BUFFER_TOO_SMALL;
+  }
+  if (ZiSucceeded(status)) {
+    for (size_t index = 0; index < input_file_count; ++index) {
+      if (input_files[index].data_block_count != 0) {
+        input_files[index].data_block += first_data_block;
+      }
+    }
+  }
   if (ZiFailed(status)) {
+    fputs("The selected ZiFS volume is too small for directory growth and input files.\n", stderr);
     return 1;
   }
 
@@ -271,8 +319,9 @@ static int format_volume(const char* path,
   superblock.checksum_type = 1;
   superblock.compatible_features = ZI_FS_FEATURE_COMPAT_NONE;
   superblock.read_only_compatible_features = ZI_FS_FEATURE_READ_ONLY_COMPAT_NONE;
-  superblock.incompatible_features =
-      ZI_FS_FEATURE_INCOMPAT_JOURNAL_V1 | ZI_FS_FEATURE_INCOMPAT_SECURITY_V1;
+  superblock.incompatible_features = ZI_FS_FEATURE_INCOMPAT_JOURNAL_V1 |
+                                     ZI_FS_FEATURE_INCOMPAT_SECURITY_V1 |
+                                     ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1;
   zi_memory_copy(superblock.volume_uuid, k_default_volume_uuid, sizeof k_default_volume_uuid);
   superblock.generation = 1;
   superblock.total_blocks = total_blocks;
@@ -316,6 +365,13 @@ static int format_volume(const char* path,
         record.security_id = 1;
         record.directory_block = node->directory_block;
         record.file_type = ZI_FS_FILE_TYPE_DIRECTORY;
+        if (node->continuation_block_count != 0) {
+          record.allocated_size = node->continuation_block_count * ZI_FS_BLOCK_SIZE;
+          record.extent_count = 1;
+          record.extents[0].logical_block = 1;
+          record.extents[0].physical_block = node->continuation_block;
+          record.extents[0].block_count = node->continuation_block_count;
+        }
       } else {
         InputFile* input_file = &input_files[node_index - node_count];
         record.file_id = input_file->file_id;
@@ -347,6 +403,7 @@ static int format_volume(const char* path,
   }
 
   for (size_t parent_index = 0; parent_index < node_count; ++parent_index) {
+    uint64_t logical_block = 0;
     status = ZiFsInitialiseDirectoryBlock(block, sizeof block, nodes[parent_index].file_id, 1);
     if (ZiFailed(status)) {
       fclose(file);
@@ -362,9 +419,9 @@ static int format_volume(const char* path,
       entry.file_type = ZI_FS_FILE_TYPE_DIRECTORY;
       entry.name.data = nodes[child_index].path + nodes[child_index].name_offset;
       entry.name.size = nodes[child_index].path_size - nodes[child_index].name_offset;
-      status = ZiFsAddDirectoryEntry(block, sizeof block, &entry);
+      status = append_directory_entry(file, &nodes[parent_index], &entry, block, &logical_block);
       if (ZiFailed(status)) {
-        fputs("A ZiFS directory block exceeded its initial capacity.\n", stderr);
+        fputs("A ZiFS directory exceeded its formatter capacity.\n", stderr);
         fclose(file);
         return 1;
       }
@@ -380,14 +437,17 @@ static int format_volume(const char* path,
       entry.file_type = ZI_FS_FILE_TYPE_REGULAR;
       entry.name.data = input_file->relative_path + input_file->name_offset;
       entry.name.size = input_file->relative_path_size - input_file->name_offset;
-      status = ZiFsAddDirectoryEntry(block, sizeof block, &entry);
+      status = append_directory_entry(file, &nodes[parent_index], &entry, block, &logical_block);
       if (ZiFailed(status)) {
-        fputs("A ZiFS directory block exceeded its initial capacity.\n", stderr);
+        fputs("A ZiFS directory exceeded its formatter capacity.\n", stderr);
         fclose(file);
         return 1;
       }
     }
-    if (ZiFailed(write_at_block(file, nodes[parent_index].directory_block, block))) {
+    if (logical_block != nodes[parent_index].continuation_block_count ||
+        ZiFailed(write_at_block(file,
+                                directory_physical_block(&nodes[parent_index], logical_block),
+                                block))) {
       fputs("Unable to write a ZiFS directory.\n", stderr);
       fclose(file);
       return 1;
@@ -419,6 +479,14 @@ static int format_volume(const char* path,
   if (ZiSucceeded(status)) {
     status =
         mark_extent(allocation_bitmap, allocation_bitmap_size, directory_start, directory_blocks);
+  }
+  for (size_t node_index = 0; node_index < node_count; ++node_index) {
+    if (ZiSucceeded(status) && nodes[node_index].continuation_block_count != 0) {
+      status = mark_extent(allocation_bitmap,
+                           allocation_bitmap_size,
+                           nodes[node_index].continuation_block,
+                           nodes[node_index].continuation_block_count);
+    }
   }
   for (size_t file_index = 0; file_index < input_file_count; ++file_index) {
     if (ZiSucceeded(status)) {
@@ -521,6 +589,8 @@ initialise_nodes(DirectoryNode* nodes, size_t node_count, uint64_t directory_sta
     nodes[index].file_id = index + 1u;
     nodes[index].record_index = index;
     nodes[index].directory_block = directory_start + index;
+    nodes[index].continuation_block = 0;
+    nodes[index].continuation_block_count = 0;
     nodes[index].parent_index = 0;
     nodes[index].name_offset = 0;
 
@@ -549,6 +619,140 @@ initialise_nodes(DirectoryNode* nodes, size_t node_count, uint64_t directory_sta
     }
   }
   return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus assign_directory_continuations(DirectoryNode* nodes,
+                                               size_t node_count,
+                                               const InputFile* input_files,
+                                               size_t input_file_count,
+                                               uint64_t first_continuation_block,
+                                               uint64_t backup_superblock,
+                                               uint64_t* out_first_data_block) {
+  if (nodes == NULL || input_files == NULL || out_first_data_block == NULL ||
+      first_continuation_block >= backup_superblock) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  uint64_t next_block = first_continuation_block;
+  for (size_t parent_index = 0; parent_index < node_count; ++parent_index) {
+    size_t used_bytes = ZI_FS_DIRECTORY_HEADER_SIZE;
+    uint64_t block_count = 1;
+    ZiStatus status =
+        account_child_directories(nodes, node_count, parent_index, &used_bytes, &block_count);
+    if (ZiFailed(status)) {
+      return status;
+    }
+    status =
+        account_child_files(input_files, input_file_count, parent_index, &used_bytes, &block_count);
+    if (ZiFailed(status)) {
+      return status;
+    }
+    uint64_t continuation_count = block_count - 1u;
+    if (block_count > ZI_FS_MAX_DIRECTORY_BLOCKS ||
+        continuation_count > backup_superblock - next_block) {
+      return ZI_STATUS_BUFFER_TOO_SMALL;
+    }
+    nodes[parent_index].continuation_block = 0;
+    if (continuation_count != 0) {
+      nodes[parent_index].continuation_block = next_block;
+    }
+    nodes[parent_index].continuation_block_count = continuation_count;
+    next_block += continuation_count;
+  }
+  *out_first_data_block = next_block;
+  return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus account_child_directories(const DirectoryNode* nodes,
+                                          size_t node_count,
+                                          size_t parent_index,
+                                          size_t* used_bytes,
+                                          uint64_t* block_count) {
+  for (size_t child_index = 1; child_index < node_count; ++child_index) {
+    if (nodes[child_index].parent_index != parent_index) {
+      continue;
+    }
+    ZiStatus status =
+        account_directory_entry(nodes[child_index].path_size - nodes[child_index].name_offset,
+                                used_bytes,
+                                block_count);
+    if (ZiFailed(status)) {
+      return status;
+    }
+  }
+  return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus account_child_files(const InputFile* input_files,
+                                    size_t input_file_count,
+                                    size_t parent_index,
+                                    size_t* used_bytes,
+                                    uint64_t* block_count) {
+  for (size_t file_index = 0; file_index < input_file_count; ++file_index) {
+    if (input_files[file_index].parent_index != parent_index) {
+      continue;
+    }
+    ZiStatus status = account_directory_entry(input_files[file_index].relative_path_size -
+                                                  input_files[file_index].name_offset,
+                                              used_bytes,
+                                              block_count);
+    if (ZiFailed(status)) {
+      return status;
+    }
+  }
+  return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus
+account_directory_entry(size_t name_size, size_t* used_bytes, uint64_t* block_count) {
+  if (used_bytes == NULL || block_count == NULL || name_size == 0 ||
+      name_size > ZI_FS_MAX_DIRECTORY_NAME_BYTES || *used_bytes < ZI_FS_DIRECTORY_HEADER_SIZE ||
+      *used_bytes > ZI_FS_BLOCK_SIZE) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  size_t entry_size = (ZI_FS_DIRECTORY_ENTRY_HEADER_SIZE + name_size + 7u) & ~(size_t)7u;
+  if (entry_size > ZI_FS_BLOCK_SIZE - ZI_FS_DIRECTORY_HEADER_SIZE) {
+    return ZI_STATUS_BUFFER_TOO_SMALL;
+  }
+  if (entry_size > ZI_FS_BLOCK_SIZE - *used_bytes) {
+    if (*block_count == UINT64_MAX) {
+      return ZI_STATUS_OUT_OF_BOUNDS;
+    }
+    ++*block_count;
+    *used_bytes = ZI_FS_DIRECTORY_HEADER_SIZE;
+  }
+  *used_bytes += entry_size;
+  return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus append_directory_entry(FILE* volume,
+                                       const DirectoryNode* node,
+                                       ZiFsDirectoryEntry* entry,
+                                       unsigned char* block,
+                                       uint64_t* logical_block) {
+  if (volume == NULL || node == NULL || entry == NULL || block == NULL || logical_block == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  ZiStatus status = ZiFsAddDirectoryEntry(block, ZI_FS_BLOCK_SIZE, entry);
+  if (status != ZI_STATUS_BUFFER_TOO_SMALL) {
+    return status;
+  }
+  if (*logical_block >= node->continuation_block_count) {
+    return ZI_STATUS_BUFFER_TOO_SMALL;
+  }
+  status = write_at_block(volume, directory_physical_block(node, *logical_block), block);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  ++*logical_block;
+  status = ZiFsInitialiseDirectoryBlock(block, ZI_FS_BLOCK_SIZE, node->file_id, 1);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  return ZiFsAddDirectoryEntry(block, ZI_FS_BLOCK_SIZE, entry);
+}
+
+static uint64_t directory_physical_block(const DirectoryNode* node, uint64_t logical_block) {
+  return logical_block == 0 ? node->directory_block : node->continuation_block + logical_block - 1u;
 }
 
 // The bounded pass validates parentage, duplicates, host files, and extent placement atomically.

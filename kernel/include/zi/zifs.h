@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -21,14 +22,17 @@
 #define ZI_FS_MAX_VOLUME_NAME_BYTES 64u
 #define ZI_FS_MAX_DIRECTORY_NAME_BYTES 255u
 #define ZI_FS_INLINE_EXTENT_COUNT 4u
+#define ZI_FS_MAX_DIRECTORY_BLOCKS 256u
 
 #define ZI_FS_FEATURE_COMPAT_NONE UINT64_C(0)
 #define ZI_FS_FEATURE_READ_ONLY_COMPAT_NONE UINT64_C(0)
 #define ZI_FS_FEATURE_INCOMPAT_NONE UINT64_C(0)
 #define ZI_FS_FEATURE_INCOMPAT_JOURNAL_V1 (UINT64_C(1) << 0)
 #define ZI_FS_FEATURE_INCOMPAT_SECURITY_V1 (UINT64_C(1) << 1)
+#define ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1 (UINT64_C(1) << 2)
 #define ZI_FS_FEATURE_INCOMPAT_SUPPORTED                                                           \
-  (ZI_FS_FEATURE_INCOMPAT_JOURNAL_V1 | ZI_FS_FEATURE_INCOMPAT_SECURITY_V1)
+  (ZI_FS_FEATURE_INCOMPAT_JOURNAL_V1 | ZI_FS_FEATURE_INCOMPAT_SECURITY_V1 |                        \
+   ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1)
 
 #define ZI_FS_SUPERBLOCK_STATE_NONE UINT32_C(0)
 #define ZI_FS_SUPERBLOCK_STATE_DIRTY (UINT32_C(1) << 0)
@@ -126,6 +130,10 @@ ZiStatus ZiFsInitialiseDirectoryBlock(void* block,
 ZiStatus ZiFsValidateDirectoryBlock(const void* block,
                                     size_t block_size,
                                     uint64_t expected_directory_file_id);
+ZiStatus ZiFsCanAddDirectoryEntry(const void* block,
+                                  size_t block_size,
+                                  const ZiFsDirectoryEntry* entry,
+                                  bool* out_can_add);
 ZiStatus ZiFsAddDirectoryEntry(void* block, size_t block_size, const ZiFsDirectoryEntry* entry);
 ZiStatus ZiFsRemoveDirectoryEntry(void* block,
                                   size_t block_size,
@@ -136,6 +144,20 @@ ZiStatus ZiFsFindDirectoryEntry(const void* block,
                                 size_t block_size,
                                 ZiStringView name,
                                 ZiFsDirectoryEntry* out_entry);
+ZiStatus ZiFsDirectoryBlockCount(const ZiFsVolume* volume,
+                                 const ZiFsFileRecord* directory,
+                                 uint64_t* out_block_count);
+ZiStatus ZiFsDirectoryBlockAt(const ZiFsVolume* volume,
+                              const ZiFsFileRecord* directory,
+                              uint64_t logical_block,
+                              uint64_t* out_physical_block);
+ZiStatus ZiFsFindDirectoryEntryInRecord(const ZiFsVolume* volume,
+                                        const ZiFsFileRecord* directory,
+                                        ZiStringView name,
+                                        void* block_buffer,
+                                        size_t block_buffer_size,
+                                        ZiFsDirectoryEntry* out_entry,
+                                        uint64_t* out_directory_block);
 ZiStatus ZiFsMountVolume(const ZiBlockDevice* device,
                          void* block_buffer,
                          size_t block_buffer_size,

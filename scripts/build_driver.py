@@ -1370,6 +1370,7 @@ def zifs_write_test(root: Path, configuration: str) -> None:
     kernel_path = kernel_build(root, configuration, build_root)
     native_outputs = native_artifacts_build(root, configuration, build_root)
     pecheck = build_root / "host" / "pecheck.exe"
+    zifs_inspector = build_root / "host" / "zifsinspect.exe"
     run([str(pecheck), "--kind", "kernel", str(kernel_path)], root=root)
 
     source_configuration = root / "boot" / "limine" / "limine.conf"
@@ -1414,6 +1415,8 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         "delete-crash-replay": "zi.test=zifs-delete-crash-replay",
         "delete-verify-old": "zi.test=zifs-delete-verify-old",
         "delete-verify-new": "zi.test=zifs-delete-verify-new",
+        "grow-directory": "zi.test=zifs-grow-directory",
+        "grow-directory-verify": "zi.test=zifs-grow-directory-verify",
         "security-corrupt": "zi.test=zifs-security-corrupt",
     }
     case_images: dict[str, Path] = {}
@@ -1510,6 +1513,21 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         (*common_markers, "[ZI:BOOT:ZIFS_WRITE_COMMIT]"),
         recovery_markers,
     )
+    run_zifs_inspector_case(
+        root,
+        zifs_inspector,
+        clean_storage,
+        0,
+        (
+            "Container: GPT image with ZiFS partition",
+            "Journal header 0: valid",
+            "Journal header 1: valid",
+            "Metadata view: on-disk home blocks",
+            "Result: valid ZiFS metadata",
+        ),
+        None,
+        mode="--gpt",
+    )
     copy_efi_system_partition(case_images["verify-present"], clean_storage)
     run_case(
         "clean-reboot",
@@ -1548,6 +1566,20 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         replay_storage,
         (*common_markers, "[ZI:BOOT:ZIFS_CRASH_REPLAY_BOUNDARY]"),
         recovery_markers,
+    )
+    run_zifs_inspector_case(
+        root,
+        zifs_inspector,
+        replay_storage,
+        1,
+        (
+            "Journal records: 1 begin",
+            ", 1 commit, 0 checkpoint",
+            "Metadata view: validated journal replay overlay",
+            "Result: metadata is readable but requires recovery or repair",
+        ),
+        None,
+        mode="--gpt",
     )
     copy_efi_system_partition(case_images["verify-present"], replay_storage)
     run_case(
@@ -1593,6 +1625,39 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         "rename-move-reboot",
         rename_storage,
         (*common_markers, "[ZI:BOOT:ZIFS_RENAME_MOVE_PERSISTED]"),
+        recovery_markers,
+    )
+
+    growth_storage = image_directory / "zizium-zifs-grow-directory-reboot.img"
+    shutil.copyfile(case_images["grow-directory"], growth_storage)
+    run_case(
+        "grow-directory",
+        growth_storage,
+        (
+            *common_markers,
+            "[ZI:BOOT:ZIFS_DIRECTORY_EXPANDED]",
+            "[ZI:BOOT:ZIFS_GROWTH_COMMIT]",
+        ),
+        recovery_markers,
+    )
+    run_zifs_inspector_case(
+        root,
+        zifs_inspector,
+        growth_storage,
+        0,
+        (
+            "Container: GPT image with ZiFS partition",
+            "Metadata view: on-disk home blocks",
+            "Result: valid ZiFS metadata",
+        ),
+        None,
+        mode="--gpt",
+    )
+    copy_efi_system_partition(case_images["grow-directory-verify"], growth_storage)
+    run_case(
+        "grow-directory-reboot",
+        growth_storage,
+        (*common_markers, "[ZI:BOOT:ZIFS_GROWTH_DIRECTORY_PERSISTED]"),
         recovery_markers,
     )
 
@@ -1786,8 +1851,9 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         allow_module_fallback=True,
     )
     print(
-        "QEMU ZiFS create, wrap, rename, move, truncate, delete, reclamation, "
-        "security-corruption, rollback, and replay tests passed across twenty-five boots."
+        "QEMU ZiFS create, growth, multi-block directory, wrap, rename, move, "
+        "truncate, delete, reclamation, security-corruption, rollback, and replay "
+        "tests passed across twenty-seven boots."
     )
 
 
@@ -2025,13 +2091,17 @@ def mutate_zifs_inspection_fixture(path: Path, mutation: str) -> None:
         record_start = int.from_bytes(superblock[80:88], "little")
         directory_start = int.from_bytes(superblock[96:104], "little")
         bitmap_start = int.from_bytes(superblock[112:120], "little")
+        bitmap_blocks = int.from_bytes(superblock[120:128], "little")
         journal_start = int.from_bytes(superblock[128:136], "little")
         security_start = int.from_bytes(superblock[144:152], "little")
+        total_blocks = int.from_bytes(superblock[64:72], "little")
         offsets: list[int]
         if mutation == "primary-superblock":
             offsets = [252]
         elif mutation == "security-record":
             offsets = [(security_start * 4096) + 256 + 48 + 4]
+        elif mutation == "journal-header":
+            offsets = [(journal_start * 4096) + 8]
         elif mutation == "journal-headers":
             offsets = [
                 (journal_start * 4096) + 8,
@@ -2041,8 +2111,41 @@ def mutate_zifs_inspection_fixture(path: Path, mutation: str) -> None:
             offsets = [(directory_start * 4096) + 64 + 24]
         elif mutation == "file-record":
             offsets = [(record_start * 4096) + 256 + 8]
-        elif mutation == "allocation":
-            offsets = [bitmap_start * 4096]
+        elif mutation in {
+            "allocation-required",
+            "allocation-leak",
+            "allocation-padding",
+        }:
+            if bitmap_blocks == 0:
+                raise BuildFailure("The ZiFS inspection fixture has no allocation map.")
+            bitmap_size = bitmap_blocks * 4096
+            file.seek(bitmap_start * 4096)
+            bitmap = bytearray(file.read(bitmap_size))
+            if len(bitmap) != bitmap_size:
+                raise BuildFailure("The ZiFS inspection allocation map is truncated.")
+            if mutation == "allocation-required":
+                bitmap[0] &= 0xFE
+            elif mutation == "allocation-leak":
+                free_block = next(
+                    (
+                        block
+                        for block in range(total_blocks)
+                        if bitmap[block // 8] & (1 << (block % 8)) == 0
+                    ),
+                    None,
+                )
+                if free_block is None:
+                    raise BuildFailure("The ZiFS inspection fixture has no free block.")
+                bitmap[free_block // 8] |= 1 << (free_block % 8)
+            else:
+                if total_blocks >= len(bitmap) * 8:
+                    raise BuildFailure(
+                        "The ZiFS inspection fixture has no padding allocation bit."
+                    )
+                bitmap[total_blocks // 8] |= 1 << (total_blocks % 8)
+            file.seek(bitmap_start * 4096)
+            file.write(bitmap)
+            offsets = []
         else:
             raise BuildFailure(f"Unknown ZiFS inspection mutation '{mutation}'.")
         for offset in offsets:
@@ -2052,13 +2155,8 @@ def mutate_zifs_inspection_fixture(path: Path, mutation: str) -> None:
                 raise BuildFailure(
                     f"ZiFS inspection mutation '{mutation}' is outside the fixture."
                 )
-            value = encoded[0]
-            if mutation == "allocation":
-                value &= 0xFE
-            else:
-                value ^= 0x21
             file.seek(offset)
-            file.write(bytes((value,)))
+            file.write(bytes((encoded[0] ^ 0x21,)))
         file.flush()
         os.fsync(file.fileno())
 
@@ -2070,8 +2168,13 @@ def run_zifs_inspector_case(
     expected_exit: int,
     required_text: tuple[str, ...],
     environment: dict[str, str] | None,
+    *,
+    mode: str | None = "--raw",
 ) -> None:
-    command = [str(inspector), "--raw", str(fixture)]
+    command = [str(inspector)]
+    if mode is not None:
+        command.append(mode)
+    command.append(str(fixture))
     print("+ " + subprocess.list2cmdline(command), flush=True)
     before_hash = file_sha256(fixture)
     result = subprocess.run(
@@ -2122,6 +2225,47 @@ def zifs_inspector_tests(
             "Result: valid ZiFS metadata",
         ),
         environment,
+        mode=None,
+    )
+    empty_input = fixture_directory / "empty-input.bin"
+    empty_input.write_bytes(b"")
+    multi_block_fixture = fixture_directory / "multi-block-directory.zifs"
+    formatter_command = [
+        str(build_root / "host" / "mkzifs.exe"),
+        str(multi_block_fixture),
+        "32",
+    ]
+    for index in range(18):
+        suffix = chr(ord("A") + index // 26) + chr(ord("A") + index % 26)
+        formatter_command.extend(
+            ["--file", f"C:\\{'D' * 218}{suffix}", str(empty_input)]
+        )
+    run(formatter_command, root=root, environment=environment)
+    with multi_block_fixture.open("rb") as volume:
+        superblock = volume.read(256)
+        record_table_start = int.from_bytes(superblock[80:88], "little")
+        incompatible_features = int.from_bytes(superblock[32:40], "little")
+        volume.seek(record_table_start * 4096)
+        root_record = volume.read(256)
+    if (
+        incompatible_features & (1 << 2) == 0
+        or int.from_bytes(root_record[40:48], "little") != 4096
+        or int.from_bytes(root_record[56:60], "little") != 1
+        or int.from_bytes(root_record[64:72], "little") != 1
+    ):
+        raise BuildFailure(
+            "mkzifs did not encode the expected versioned directory continuation."
+        )
+    run_zifs_inspector_case(
+        root,
+        inspector,
+        multi_block_fixture,
+        0,
+        (
+            "Namespace: 93 live records (18 regular, 75 directories, 0 other), 92 entries",
+            "Result: valid ZiFS metadata",
+        ),
+        environment,
     )
     cases = (
         (
@@ -2129,10 +2273,25 @@ def zifs_inspector_tests(
             ("Selected superblock: backup", "requires recovery or repair"),
         ),
         ("security-record", ("security=checksum mismatch", "Result: invalid")),
+        (
+            "journal-header",
+            ("Journal header 0: checksum mismatch", "requires recovery or repair"),
+        ),
         ("journal-headers", ("journal=checksum mismatch", "Result: invalid")),
         ("directory", ("namespace=checksum mismatch", "Result: invalid")),
         ("file-record", ("namespace=checksum mismatch", "Result: invalid")),
-        ("allocation", ("allocation=corrupt filesystem", "Result: invalid")),
+        (
+            "allocation-required",
+            ("allocation=corrupt filesystem", "Result: invalid"),
+        ),
+        (
+            "allocation-leak",
+            ("1 allocated but unreferenced", "requires recovery or repair"),
+        ),
+        (
+            "allocation-padding",
+            ("allocation=corrupt filesystem", "Result: invalid"),
+        ),
     )
     for mutation, required_text in cases:
         fixture = fixture_directory / f"corrupt-{mutation}.zifs"
@@ -2146,7 +2305,7 @@ def zifs_inspector_tests(
             required_text,
             environment,
         )
-    print("ZiFS read-only inspector acceptance tests passed across seven fixtures.")
+    print("ZiFS read-only inspector acceptance tests passed across eleven fixtures.")
 
 
 def run_tests(root: Path, configuration: str, *, sanitised: bool = False) -> None:
