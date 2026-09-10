@@ -49,7 +49,7 @@ static const char k_log_host[] =
 
 static const char k_session_host[] =
     "FormatVersion=1\nName=SessionHost\nExecutable=C:\\Zizium\\System\\SessionHost.exe\n"
-    "ServiceKind=System\nIdentity=NID:SYSTEM\nStartMode=System\nStartOrder=10\n"
+    "ServiceKind=System\nIdentity=NID:SERVICE:SessionHost\nStartMode=System\nStartOrder=10\n"
     "Dependencies=SecurityHost,LogHost\nRestartPolicy=OnFailure\n"
     "TokenPolicy=SessionBootstrap\nMaximumRestarts=1\nStatus=Implemented\n";
 

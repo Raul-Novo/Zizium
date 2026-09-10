@@ -45,6 +45,7 @@ typedef struct Phase7MemoryVolume {
   size_t fail_operation;
   size_t write_count;
   size_t flush_count;
+  uint64_t write_blocks[8];
 } Phase7MemoryVolume;
 
 static unsigned char s_phase7_volume[PHASE7_VOLUME_BLOCKS][ZI_FS_BLOCK_SIZE];
@@ -78,6 +79,8 @@ static bool phase7_assert(bool condition, const char* expression, int line) {
 static bool test_allocation_contract(void);
 static bool test_journal_header_contract(void);
 static bool test_journal_record_contract(void);
+static bool test_clean_unmount_contract(void);
+static bool test_redundancy_survivor_order(void);
 static bool test_in_memory_create_transaction(void);
 static bool test_durable_commit_and_recovery(void);
 static bool test_large_transaction_and_journal_wrap(void);
@@ -99,6 +102,8 @@ static ZiStatus phase7_memory_write(void* context,
                                     size_t input_size);
 static ZiStatus phase7_memory_flush(void* context);
 static bool initialise_transaction_volume(ZiFsVolume* out_volume, bool writable);
+static bool initialise_clean_unmount_image(void);
+static void initialise_memory_device(ZiBlockDevice* out_device, bool writable);
 static bool initialise_security_table(void);
 static bool mount_transaction_volume(ZiFsVolume* out_volume, bool writable);
 static bool enable_directory_extents(ZiFsVolume* out_volume, bool writable);
@@ -160,6 +165,12 @@ bool phase7_zifs_wire_test(size_t* out_assertion_count) {
   }
   if (result) {
     result = test_journal_record_contract();
+  }
+  if (result) {
+    result = test_clean_unmount_contract();
+  }
+  if (result) {
+    result = test_redundancy_survivor_order();
   }
   if (result) {
     result = test_in_memory_create_transaction();
@@ -376,6 +387,174 @@ static bool test_journal_record_contract(void) {
   return true;
 }
 
+// This test exercises every durability boundary in mount activation and clean unmount.
+// NOLINTNEXTLINE(readability-function-size, readability-function-cognitive-complexity)
+static bool test_clean_unmount_contract(void) {
+  PHASE7_ASSERT(initialise_clean_unmount_image());
+  zi_memory_copy(s_phase7_snapshot, s_phase7_volume, sizeof s_phase7_snapshot);
+  for (size_t index = 0; index < sizeof s_phase7_payload; ++index) {
+    s_phase7_payload[index] = (unsigned char)(index ^ (index >> 8u) ^ UINT8_C(0x21));
+  }
+
+  ZiBlockDevice device = {0};
+  initialise_memory_device(&device, true);
+  unsigned char block[ZI_FS_BLOCK_SIZE] = {0};
+  ZiFsVolume volume = {0};
+  PHASE7_ASSERT(ZiSucceeded(ZiFsMountVolume(&device, block, sizeof block, &volume)) &&
+                volume.is_mounted != 0 && volume.is_read_only == 0 && volume.needs_recovery == 0 &&
+                volume.superblock.state_flags == ZI_FS_SUPERBLOCK_STATE_MOUNTED &&
+                s_phase7_memory.write_count == 2 && s_phase7_memory.flush_count == 2);
+  ZiFsSuperblock primary = {0};
+  ZiFsSuperblock backup = {0};
+  PHASE7_ASSERT(ZiSucceeded(ZiFsDecodeSuperblock(s_phase7_volume[0], ZI_FS_BLOCK_SIZE, &primary)) &&
+                ZiSucceeded(ZiFsDecodeSuperblock(s_phase7_volume[PHASE7_VOLUME_BLOCKS - 1u],
+                                                 ZI_FS_BLOCK_SIZE,
+                                                 &backup)) &&
+                primary.state_flags == ZI_FS_SUPERBLOCK_STATE_MOUNTED &&
+                backup.state_flags == ZI_FS_SUPERBLOCK_STATE_MOUNTED);
+  PHASE7_ASSERT(ZiSucceeded(ZiFsFlushVolume(&volume, block, sizeof block)) &&
+                s_phase7_memory.flush_count == 3);
+
+  ZiFsTransaction transaction = {0};
+  ZiFsCreateResult create_result = {0};
+  PHASE7_ASSERT(prepare_test_create(&volume, &transaction, &create_result));
+  PHASE7_ASSERT(ZiSucceeded(ZiFsTransactionCommit(&transaction)) &&
+                volume.superblock.state_flags == ZI_FS_SUPERBLOCK_STATE_MOUNTED &&
+                volume.is_mounted != 0);
+  PHASE7_ASSERT(ZiSucceeded(ZiFsUnmountVolume(&volume, block, sizeof block)) &&
+                volume.is_mounted == 0 && volume.is_read_only != 0 &&
+                volume.superblock.state_flags == ZI_FS_SUPERBLOCK_STATE_NONE);
+  PHASE7_ASSERT(ZiSucceeded(ZiFsDecodeSuperblock(s_phase7_volume[0], ZI_FS_BLOCK_SIZE, &primary)) &&
+                ZiSucceeded(ZiFsDecodeSuperblock(s_phase7_volume[PHASE7_VOLUME_BLOCKS - 1u],
+                                                 ZI_FS_BLOCK_SIZE,
+                                                 &backup)) &&
+                primary.state_flags == ZI_FS_SUPERBLOCK_STATE_NONE &&
+                backup.state_flags == ZI_FS_SUPERBLOCK_STATE_NONE);
+  PHASE7_ASSERT(ZiFsFlushVolume(&volume, block, sizeof block) == ZI_STATUS_INVALID_STATE &&
+                ZiFsUnmountVolume(&volume, block, sizeof block) == ZI_STATUS_INVALID_STATE);
+
+  zi_memory_copy(s_phase7_volume, s_phase7_snapshot, sizeof s_phase7_volume);
+  initialise_memory_device(&device, true);
+  zi_memory_zero(&volume, sizeof volume);
+  PHASE7_ASSERT(ZiSucceeded(ZiFsMountVolume(&device, block, sizeof block, &volume)));
+  ZiFsVolume restarted = {0};
+  PHASE7_ASSERT(ZiFsMountVolume(&device, block, sizeof block, &restarted) ==
+                    ZI_STATUS_RECOVERY_REQUIRED &&
+                restarted.superblock.state_flags == ZI_FS_SUPERBLOCK_STATE_MOUNTED &&
+                restarted.needs_recovery != 0 && restarted.is_mounted == 0);
+  ZiFsRecoveryReport report = {0};
+  PHASE7_ASSERT(ZiSucceeded(ZiFsRecoverVolume(&restarted,
+                                              s_phase7_recovery_workspace,
+                                              sizeof s_phase7_recovery_workspace,
+                                              &report)) &&
+                report.action == ZI_FS_RECOVERY_ACTION_RECOVERED_UNCLEAN_MOUNT &&
+                restarted.superblock.state_flags == ZI_FS_SUPERBLOCK_STATE_NONE &&
+                restarted.is_mounted == 0);
+  zi_memory_zero(&restarted, sizeof restarted);
+  PHASE7_ASSERT(ZiSucceeded(ZiFsMountVolume(&device, block, sizeof block, &restarted)) &&
+                restarted.superblock.state_flags == ZI_FS_SUPERBLOCK_STATE_MOUNTED &&
+                ZiSucceeded(ZiFsUnmountVolume(&restarted, block, sizeof block)));
+
+  for (size_t failure = 1; failure <= 4; ++failure) {
+    zi_memory_copy(s_phase7_volume, s_phase7_snapshot, sizeof s_phase7_volume);
+    initialise_memory_device(&device, true);
+    s_phase7_memory.fail_operation = failure;
+    ZiFsVolume failed = {0};
+    PHASE7_ASSERT(ZiFsMountVolume(&device, block, sizeof block, &failed) ==
+                      ZI_STATUS_DEVICE_ERROR &&
+                  failed.is_mounted == 0 && failed.is_read_only != 0 && failed.needs_recovery != 0);
+    s_phase7_memory.fail_operation = 0;
+    s_phase7_memory.operation_count = 0;
+    PHASE7_ASSERT(recover_failed_transaction(&device, &failed) && failed.is_mounted != 0 &&
+                  failed.superblock.state_flags == ZI_FS_SUPERBLOCK_STATE_MOUNTED &&
+                  ZiSucceeded(ZiFsUnmountVolume(&failed, block, sizeof block)));
+  }
+
+  for (size_t failure = 1; failure <= 5; ++failure) {
+    zi_memory_copy(s_phase7_volume, s_phase7_snapshot, sizeof s_phase7_volume);
+    initialise_memory_device(&device, true);
+    ZiFsVolume failed = {0};
+    PHASE7_ASSERT(ZiSucceeded(ZiFsMountVolume(&device, block, sizeof block, &failed)));
+    s_phase7_memory.operation_count = 0;
+    s_phase7_memory.fail_operation = failure;
+    PHASE7_ASSERT(ZiFsUnmountVolume(&failed, block, sizeof block) == ZI_STATUS_DEVICE_ERROR &&
+                  failed.is_mounted == 0 && failed.is_read_only != 0 && failed.needs_recovery != 0);
+    s_phase7_memory.fail_operation = 0;
+    s_phase7_memory.operation_count = 0;
+    PHASE7_ASSERT(recover_failed_transaction(&device, &failed) && failed.is_mounted != 0 &&
+                  ZiSucceeded(ZiFsUnmountVolume(&failed, block, sizeof block)));
+  }
+
+  zi_memory_copy(s_phase7_volume, s_phase7_snapshot, sizeof s_phase7_volume);
+  initialise_memory_device(&device, false);
+  zi_memory_zero(&volume, sizeof volume);
+  PHASE7_ASSERT(ZiSucceeded(ZiFsMountVolume(&device, block, sizeof block, &volume)) &&
+                volume.is_mounted != 0 && volume.is_read_only != 0 &&
+                volume.superblock.state_flags == ZI_FS_SUPERBLOCK_STATE_NONE &&
+                ZiSucceeded(ZiFsFlushVolume(&volume, block, sizeof block)) &&
+                ZiSucceeded(ZiFsUnmountVolume(&volume, block, sizeof block)));
+
+  PHASE7_ASSERT(
+      ZiSucceeded(ZiFsDecodeSuperblock(s_phase7_snapshot[0], ZI_FS_BLOCK_SIZE, &primary)));
+  primary.state_flags = ZI_FS_SUPERBLOCK_STATE_TRANSACTION_DIRTY;
+  PHASE7_ASSERT(ZiFsEncodeSuperblock(&primary, block, sizeof block) == ZI_STATUS_INVALID_ARGUMENT);
+  primary.state_flags = ZI_FS_SUPERBLOCK_STATE_MOUNTED | ZI_FS_SUPERBLOCK_STATE_TRANSACTION_DIRTY;
+  PHASE7_ASSERT(ZiSucceeded(ZiFsEncodeSuperblock(&primary, block, sizeof block)));
+  primary.incompatible_features &= ~ZI_FS_FEATURE_INCOMPAT_CLEAN_UNMOUNT_V1;
+  primary.state_flags = ZI_FS_SUPERBLOCK_STATE_MOUNTED;
+  PHASE7_ASSERT(ZiFsEncodeSuperblock(&primary, block, sizeof block) == ZI_STATUS_INVALID_ARGUMENT);
+  PHASE7_ASSERT(ZiFsFlushVolume(NULL, block, sizeof block) == ZI_STATUS_INVALID_ARGUMENT &&
+                ZiFsUnmountVolume(NULL, block, sizeof block) == ZI_STATUS_INVALID_ARGUMENT);
+  return true;
+}
+
+// Recovery must make the non-authoritative copy durable before replacing its only survivor.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+static bool test_redundancy_survivor_order(void) {
+  PHASE7_ASSERT(initialise_clean_unmount_image());
+  s_phase7_volume[0][0] ^= UINT8_C(0xff);
+  ZiBlockDevice device = {0};
+  initialise_memory_device(&device, true);
+  unsigned char block[ZI_FS_BLOCK_SIZE] = {0};
+  ZiFsVolume volume = {0};
+  PHASE7_ASSERT(ZiFsMountVolume(&device, block, sizeof block, &volume) ==
+                    ZI_STATUS_RECOVERY_REQUIRED &&
+                volume.mounted_from_backup != 0);
+  ZiFsRecoveryReport report = {0};
+  PHASE7_ASSERT(ZiSucceeded(ZiFsRecoverVolume(&volume,
+                                              s_phase7_recovery_workspace,
+                                              sizeof s_phase7_recovery_workspace,
+                                              &report)) &&
+                report.action == ZI_FS_RECOVERY_ACTION_REPAIRED_REDUNDANCY &&
+                s_phase7_memory.write_count == 4 && s_phase7_memory.write_blocks[0] == 0 &&
+                s_phase7_memory.write_blocks[1] == PHASE7_VOLUME_BLOCKS - 1u &&
+                s_phase7_memory.write_blocks[2] == PHASE7_JOURNAL_START &&
+                s_phase7_memory.write_blocks[3] == PHASE7_JOURNAL_START + 1u);
+
+  PHASE7_ASSERT(initialise_transaction_volume(&volume, true));
+  s_phase7_volume[PHASE7_JOURNAL_START + 1u][0] ^= UINT8_C(0xff);
+  s_phase7_memory.operation_count = 0;
+  s_phase7_memory.write_count = 0;
+  s_phase7_memory.flush_count = 0;
+  for (size_t index = 0;
+       index < sizeof s_phase7_memory.write_blocks / sizeof s_phase7_memory.write_blocks[0];
+       ++index) {
+    s_phase7_memory.write_blocks[index] = UINT64_MAX;
+  }
+  zi_memory_zero(&report, sizeof report);
+  PHASE7_ASSERT(ZiSucceeded(ZiFsRecoverVolume(&volume,
+                                              s_phase7_recovery_workspace,
+                                              sizeof s_phase7_recovery_workspace,
+                                              &report)) &&
+                report.action == ZI_FS_RECOVERY_ACTION_REPAIRED_REDUNDANCY &&
+                s_phase7_memory.write_count == 4 &&
+                s_phase7_memory.write_blocks[0] == PHASE7_VOLUME_BLOCKS - 1u &&
+                s_phase7_memory.write_blocks[1] == 0 &&
+                s_phase7_memory.write_blocks[2] == PHASE7_JOURNAL_START + 1u &&
+                s_phase7_memory.write_blocks[3] == PHASE7_JOURNAL_START);
+  return true;
+}
+
 // The test keeps staged metadata inspection and all failure paths together as one transaction.
 // NOLINTNEXTLINE(readability-function-size, readability-function-cognitive-complexity)
 static bool test_in_memory_create_transaction(void) {
@@ -568,6 +747,9 @@ static ZiStatus phase7_memory_write(void* context,
     return ZI_STATUS_DEVICE_ERROR;
   }
   zi_memory_copy(memory->bytes + offset, input, byte_count);
+  if (memory->write_count < sizeof memory->write_blocks / sizeof memory->write_blocks[0]) {
+    memory->write_blocks[memory->write_count] = first_block;
+  }
   ++memory->write_count;
   return ZI_STATUS_SUCCESS;
 }
@@ -678,6 +860,52 @@ static bool initialise_transaction_volume(ZiFsVolume* out_volume, bool writable)
   return mount_transaction_volume(out_volume, writable);
 }
 
+static bool initialise_clean_unmount_image(void) {
+  ZiFsVolume legacy_volume = {0};
+  if (!initialise_transaction_volume(&legacy_volume, false)) {
+    return false;
+  }
+  ZiFsSuperblock superblock = legacy_volume.superblock;
+  superblock.incompatible_features |= ZI_FS_FEATURE_INCOMPAT_CLEAN_UNMOUNT_V1;
+  superblock.state_flags = ZI_FS_SUPERBLOCK_STATE_NONE;
+  if (ZiFailed(ZiFsEncodeSuperblock(&superblock, s_phase7_volume[0], ZI_FS_BLOCK_SIZE))) {
+    return false;
+  }
+  zi_memory_copy(s_phase7_volume[PHASE7_VOLUME_BLOCKS - 1u], s_phase7_volume[0], ZI_FS_BLOCK_SIZE);
+  return true;
+}
+
+static void initialise_memory_device(ZiBlockDevice* out_device, bool writable) {
+  s_phase7_memory.bytes = &s_phase7_volume[0][0];
+  s_phase7_memory.size = sizeof s_phase7_volume;
+  s_phase7_memory.operation_count = 0;
+  s_phase7_memory.fail_operation = 0;
+  s_phase7_memory.write_count = 0;
+  s_phase7_memory.flush_count = 0;
+  for (size_t index = 0;
+       index < sizeof s_phase7_memory.write_blocks / sizeof s_phase7_memory.write_blocks[0];
+       ++index) {
+    s_phase7_memory.write_blocks[index] = UINT64_MAX;
+  }
+  ZiBlockDevice device = {
+      sizeof(ZiBlockDevice),
+      ZI_BLOCK_DEVICE_VERSION,
+      &s_phase7_memory,
+      ZI_FS_BLOCK_SIZE,
+      PHASE7_VOLUME_BLOCKS,
+      phase7_memory_read,
+      NULL,
+      ZI_BLOCK_DEVICE_READ_ONLY,
+      NULL,
+  };
+  if (writable) {
+    device.flush = phase7_memory_flush;
+    device.flags = ZI_BLOCK_DEVICE_WRITE_SUPPORTED | ZI_BLOCK_DEVICE_FLUSH_SUPPORTED;
+    device.write_blocks = phase7_memory_write;
+  }
+  *out_device = device;
+}
+
 static bool initialise_security_table(void) {
   const ZiSecurityId owner = {ZI_SECURITY_AUTHORITY_USER, 21};
   const ZiSecurityId group = {ZI_SECURITY_AUTHORITY_GROUP, 7};
@@ -703,28 +931,8 @@ static bool initialise_security_table(void) {
 }
 
 static bool mount_transaction_volume(ZiFsVolume* out_volume, bool writable) {
-  s_phase7_memory.bytes = &s_phase7_volume[0][0];
-  s_phase7_memory.size = sizeof s_phase7_volume;
-  s_phase7_memory.operation_count = 0;
-  s_phase7_memory.fail_operation = 0;
-  s_phase7_memory.write_count = 0;
-  s_phase7_memory.flush_count = 0;
-  ZiBlockDevice device = {
-      sizeof(ZiBlockDevice),
-      ZI_BLOCK_DEVICE_VERSION,
-      &s_phase7_memory,
-      ZI_FS_BLOCK_SIZE,
-      PHASE7_VOLUME_BLOCKS,
-      phase7_memory_read,
-      NULL,
-      ZI_BLOCK_DEVICE_READ_ONLY,
-      NULL,
-  };
-  if (writable) {
-    device.flush = phase7_memory_flush;
-    device.flags = ZI_BLOCK_DEVICE_WRITE_SUPPORTED | ZI_BLOCK_DEVICE_FLUSH_SUPPORTED;
-    device.write_blocks = phase7_memory_write;
-  }
+  ZiBlockDevice device = {0};
+  initialise_memory_device(&device, writable);
   unsigned char scratch[ZI_FS_BLOCK_SIZE] = {0};
   return ZiSucceeded(ZiFsMountVolume(&device, scratch, sizeof scratch, out_volume));
 }

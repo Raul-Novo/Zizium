@@ -128,7 +128,7 @@ ZiStatus zi_handle_duplicate(ZiHandleTable* source_table,
                              uint32_t flags,
                              ZiHandle* out_handle) {
   if (source_table == NULL || target_table == NULL || target_token == NULL || out_handle == NULL ||
-      (flags & ~ZI_HANDLE_DUPLICATE_SAME_ACCESS) != 0 ||
+      (flags & ~(uint32_t)ZI_HANDLE_DUPLICATE_SAME_ACCESS) != 0 ||
       ((flags & ZI_HANDLE_DUPLICATE_SAME_ACCESS) == 0 && requested_access == 0)) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }

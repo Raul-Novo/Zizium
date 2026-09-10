@@ -58,6 +58,8 @@ static ZiStatus validate_recovery_image(const ZiFsVolume* volume,
                                         uint32_t* checksum);
 static ZiStatus replay_images(ZiFsVolume* volume, void* workspace, const RecoveryScan* scan);
 static ZiStatus
+checkpointed_unclean_mount(const ZiFsVolume* volume, void* block_buffer, bool* out_checkpointed);
+static ZiStatus
 write_clean_superblocks(ZiFsVolume* volume, const ZiFsSuperblock* superblock, void* block_buffer);
 static ZiStatus reset_journal_headers(ZiFsVolume* volume,
                                       const ZiFsSuperblock* superblock,
@@ -88,15 +90,35 @@ ZiStatus ZiFsRecoverVolume(ZiFsVolume* volume,
   out_report->version = ZI_FS_RECOVERY_REPORT_VERSION;
 
   ZiFsSuperblock recovered = volume->superblock;
-  if (recovered.state_flags == ZI_FS_SUPERBLOCK_STATE_NONE) {
-    ZiStatus status = write_clean_superblocks(volume, &recovered, workspace);
-    if (ZiSucceeded(status)) {
-      status = reset_journal_headers(volume, &recovered, 1, UINT64_MAX, workspace);
-    }
+  bool recovered_unclean_mount = false;
+  if ((recovered.incompatible_features & ZI_FS_FEATURE_INCOMPAT_CLEAN_UNMOUNT_V1) != 0 &&
+      recovered.state_flags == ZI_FS_SUPERBLOCK_STATE_MOUNTED) {
+    ZiStatus status = checkpointed_unclean_mount(volume, workspace, &recovered_unclean_mount);
     if (ZiFailed(status)) {
       return status;
     }
-    out_report->action = ZI_FS_RECOVERY_ACTION_REPAIRED_REDUNDANCY;
+    if (recovered_unclean_mount) {
+      recovered.state_flags = ZI_FS_SUPERBLOCK_STATE_NONE;
+      status = write_clean_superblocks(volume, &recovered, workspace);
+      if (ZiFailed(status)) {
+        return status;
+      }
+      out_report->action = ZI_FS_RECOVERY_ACTION_RECOVERED_UNCLEAN_MOUNT;
+      out_report->source_generation = recovered.generation;
+      out_report->target_generation = recovered.generation;
+    }
+  }
+  if (recovered.state_flags == ZI_FS_SUPERBLOCK_STATE_NONE) {
+    if (!recovered_unclean_mount) {
+      ZiStatus status = write_clean_superblocks(volume, &recovered, workspace);
+      if (ZiSucceeded(status)) {
+        status = reset_journal_headers(volume, &recovered, 1, UINT64_MAX, workspace);
+      }
+      if (ZiFailed(status)) {
+        return status;
+      }
+      out_report->action = ZI_FS_RECOVERY_ACTION_REPAIRED_REDUNDANCY;
+    }
   } else {
     if (recovered.generation < 2 || recovered.last_committed_transaction == 0) {
       return ZI_STATUS_CORRUPT_FILESYSTEM;
@@ -162,6 +184,7 @@ ZiStatus ZiFsRecoverVolume(ZiFsVolume* volume,
   volume->needs_recovery = 0;
   volume->journal_header_valid = 1;
   volume->is_read_only = 0;
+  volume->is_mounted = 0;
   ZiFsFileRecord root = {0};
   ZiStatus status =
       ZiFsReadFileRecord(volume, recovered.root_record_index, workspace, ZI_FS_BLOCK_SIZE, &root);
@@ -169,6 +192,41 @@ ZiStatus ZiFsRecoverVolume(ZiFsVolume* volume,
     volume->is_read_only = 1;
     volume->needs_recovery = 1;
     return ZI_STATUS_CORRUPT_FILESYSTEM;
+  }
+  return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus
+checkpointed_unclean_mount(const ZiFsVolume* volume, void* block_buffer, bool* out_checkpointed) {
+  if (volume == NULL || block_buffer == NULL || out_checkpointed == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  *out_checkpointed = false;
+  uint64_t expected_capacity = 0;
+  ZiStatus status =
+      ZiFsJournalRecordCapacity(volume->superblock.journal_blocks, &expected_capacity);
+  ZiFsJournalHeader header = {0};
+  uint32_t header_copy = 0;
+  if (ZiSucceeded(status)) {
+    status = ZiFsLoadJournalHeader(&volume->device,
+                                   volume->superblock.journal_start,
+                                   block_buffer,
+                                   ZI_FS_BLOCK_SIZE,
+                                   &header,
+                                   &header_copy);
+  }
+  if (ZiFailed(status)) {
+    return status;
+  }
+  if (header.record_capacity != expected_capacity) {
+    return ZI_STATUS_CORRUPT_FILESYSTEM;
+  }
+  if (header.volume_generation == volume->superblock.generation &&
+      header.last_committed_transaction == volume->superblock.last_committed_transaction &&
+      header.last_checkpoint_transaction == header.last_committed_transaction &&
+      header.head_record == header.tail_record && header.last_committed_transaction != UINT64_MAX &&
+      header.next_transaction_id == header.last_committed_transaction + 1u) {
+    *out_checkpointed = true;
   }
   return ZI_STATUS_SUCCESS;
 }
@@ -420,18 +478,19 @@ write_clean_superblocks(ZiFsVolume* volume, const ZiFsSuperblock* superblock, vo
   if (ZiFailed(status)) {
     return status;
   }
-  status = zi_block_write(&volume->device,
-                          superblock->backup_superblock,
-                          1,
-                          block_buffer,
-                          ZI_FS_BLOCK_SIZE);
+  const uint64_t blocks[2] = {0, superblock->backup_superblock};
+  uint32_t selected_copy = volume->mounted_from_backup != 0 ? 1u : 0u;
+  const uint32_t write_order[2] = {selected_copy ^ 1u, selected_copy};
+  status =
+      zi_block_write(&volume->device, blocks[write_order[0]], 1, block_buffer, ZI_FS_BLOCK_SIZE);
   if (ZiSucceeded(status)) {
     status = zi_block_barrier(&volume->device);
   }
   if (ZiFailed(status)) {
     return status;
   }
-  status = zi_block_write(&volume->device, 0, 1, block_buffer, ZI_FS_BLOCK_SIZE);
+  status =
+      zi_block_write(&volume->device, blocks[write_order[1]], 1, block_buffer, ZI_FS_BLOCK_SIZE);
   if (ZiSucceeded(status)) {
     status = zi_block_barrier(&volume->device);
   }
@@ -452,6 +511,7 @@ static ZiStatus reset_journal_headers(ZiFsVolume* volume,
   }
   ZiFsJournalHeader previous = {0};
   uint32_t previous_copy = 0;
+  bool previous_valid = false;
   uint64_t header_sequence = 0;
   uint64_t head_record = reclaimed_head == UINT64_MAX ? 0 : reclaimed_head;
   uint64_t next_sequence = minimum_next_sequence == 0 ? 1 : minimum_next_sequence;
@@ -462,6 +522,7 @@ static ZiStatus reset_journal_headers(ZiFsVolume* volume,
                                  &previous,
                                  &previous_copy);
   if (ZiSucceeded(status) && previous.record_capacity == capacity) {
+    previous_valid = true;
     header_sequence = previous.header_sequence;
     if (reclaimed_head == UINT64_MAX) {
       head_record = previous.head_record;
@@ -482,8 +543,16 @@ static ZiStatus reset_journal_headers(ZiFsVolume* volume,
   header.next_transaction_id = superblock->last_committed_transaction + 1u;
   header.last_committed_transaction = superblock->last_committed_transaction;
   header.last_checkpoint_transaction = superblock->last_committed_transaction;
-  for (uint32_t copy_index = 0; copy_index < ZI_FS_JOURNAL_HEADER_COPIES; ++copy_index) {
-    header.header_sequence = header_sequence + copy_index + 1u;
+  uint32_t first_copy = 0;
+  uint32_t second_copy = 1;
+  if (previous_valid) {
+    first_copy = previous_copy ^ 1u;
+    second_copy = previous_copy;
+  }
+  const uint32_t copy_order[2] = {first_copy, second_copy};
+  for (uint32_t order_index = 0; order_index < ZI_FS_JOURNAL_HEADER_COPIES; ++order_index) {
+    uint32_t copy_index = copy_order[order_index];
+    header.header_sequence = header_sequence + order_index + 1u;
     status = ZiFsStoreJournalHeader(&volume->device,
                                     superblock->journal_start,
                                     copy_index,

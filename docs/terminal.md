@@ -39,7 +39,15 @@ Tests cover wrapping, eviction, viewport movement, history, quoting, spaces,
 incomplete quotes, argument limits, Unicode input, and distinct `I`, `l`, `1`,
 `O`, and `0` glyphs.
 
+Framebuffer pixel stores use explicit little-endian byte writes, so an
+unaligned row address does not become a misaligned C `uint32_t` access.
+The generated font and glyph lookup share one declaration in `zi/font.h`.
+
 ## Scaffolded
+
+Luma runs with the bootstrap USER:21 identity and Users membership only. Its
+child image and DLL loads inherit that token and undergo filesystem ACL checks.
+This identity is a demonstration fixture, not credential-verified logon.
 
 Interactive console IPC, keyboard-driven user-mode Luma, object-valued pipeline
 output, redirection, richer line editing, asynchronous output, and true

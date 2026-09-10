@@ -319,9 +319,9 @@ static int format_volume(const char* path,
   superblock.checksum_type = 1;
   superblock.compatible_features = ZI_FS_FEATURE_COMPAT_NONE;
   superblock.read_only_compatible_features = ZI_FS_FEATURE_READ_ONLY_COMPAT_NONE;
-  superblock.incompatible_features = ZI_FS_FEATURE_INCOMPAT_JOURNAL_V1 |
-                                     ZI_FS_FEATURE_INCOMPAT_SECURITY_V1 |
-                                     ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1;
+  superblock.incompatible_features =
+      ZI_FS_FEATURE_INCOMPAT_JOURNAL_V1 | ZI_FS_FEATURE_INCOMPAT_SECURITY_V1 |
+      ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1 | ZI_FS_FEATURE_INCOMPAT_CLEAN_UNMOUNT_V1;
   zi_memory_copy(superblock.volume_uuid, k_default_volume_uuid, sizeof k_default_volume_uuid);
   superblock.generation = 1;
   superblock.total_blocks = total_blocks;

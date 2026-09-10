@@ -10,6 +10,7 @@
 #include "phase5_tests.h"
 #include "phase6_tests.h"
 #include "phase7_tests.h"
+#include "phase8_tests.h"
 #include "zi/address_space.h"
 #include "zi/block.h"
 #include "zi/boot.h"
@@ -96,6 +97,11 @@ static bool test_phase6_zifs_files(void);
 static bool test_phase6_service_manifests(void);
 static bool test_phase7_zifs_wire(void);
 static bool test_phase7_zifs_security(void);
+static bool test_phase7_zifs_repair(void);
+static bool test_phase8_security_boundary(void);
+static bool test_phase8_nvme_window(void);
+static bool test_phase8_service_identity(void);
+static bool test_phase8_image_authorisation(void);
 static ZiStatus memory_read_blocks(void* context,
                                    uint64_t first_block,
                                    uint32_t block_count,
@@ -165,6 +171,11 @@ int main(void) {
       {"Phase 6 service manifests and dependency graph", test_phase6_service_manifests},
       {"Phase 7 ZiFS allocation, journal, and staged create", test_phase7_zifs_wire},
       {"Phase 7 ZiFS durable security descriptors", test_phase7_zifs_security},
+      {"Phase 7 ZiFS bounded offline repair", test_phase7_zifs_repair},
+      {"Phase 8 token roles and inheritance-only ACEs", test_phase8_security_boundary},
+      {"NVMe register alignment and doorbell bounds", test_phase8_nvme_window},
+      {"Approved bootstrap service identities and restricted tokens", test_phase8_service_identity},
+      {"Image source and directory traversal authorisation", test_phase8_image_authorisation},
       {"terminal scrollback and history", test_terminal},
       {"display scaling", test_display_scale},
       {"Luma tokenisation", test_luma},
@@ -480,6 +491,9 @@ static bool test_pool_and_object_cache(void) {
   ZiObjectCache cache = {0};
   TEST_ASSERT(ZiSucceeded(zi_pool_initialise(cache_arena, sizeof cache_arena, &cache_pool)));
   TEST_ASSERT(ZiSucceeded(zi_object_cache_initialise(&cache_pool, 24, 3, &cache)));
+  ZiObjectCache misaligned_cache = cache;
+  ++misaligned_cache.storage;
+  TEST_ASSERT(zi_object_cache_validate(&misaligned_cache) == ZI_STATUS_INVALID_ARGUMENT);
   void* object_a = NULL;
   void* object_b = NULL;
   void* object_c = NULL;
@@ -1520,6 +1534,41 @@ static bool test_phase7_zifs_wire(void) {
 static bool test_phase7_zifs_security(void) {
   size_t assertion_count = 0;
   bool result = phase7_zifs_security_test(&assertion_count);
+  g_assertion_count += assertion_count;
+  return result;
+}
+
+static bool test_phase7_zifs_repair(void) {
+  size_t assertion_count = 0;
+  bool result = phase7_zifs_repair_test(&assertion_count);
+  g_assertion_count += assertion_count;
+  return result;
+}
+
+static bool test_phase8_security_boundary(void) {
+  size_t assertion_count = 0;
+  bool result = phase8_security_boundary_test(&assertion_count);
+  g_assertion_count += assertion_count;
+  return result;
+}
+
+static bool test_phase8_nvme_window(void) {
+  size_t assertion_count = 0;
+  bool result = phase8_nvme_window_test(&assertion_count);
+  g_assertion_count += assertion_count;
+  return result;
+}
+
+static bool test_phase8_service_identity(void) {
+  size_t assertion_count = 0;
+  bool result = phase8_service_identity_test(&assertion_count);
+  g_assertion_count += assertion_count;
+  return result;
+}
+
+static bool test_phase8_image_authorisation(void) {
+  size_t assertion_count = 0;
+  bool result = phase8_image_authorisation_test(&assertion_count);
   g_assertion_count += assertion_count;
   return result;
 }

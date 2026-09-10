@@ -10,6 +10,7 @@
 #include "zi/byte_order.h"
 #include "zi/crc32c.h"
 #include "zi/path.h"
+#include "zi/security.h"
 #include "zi/unicode.h"
 #include "zi/zifs_journal.h"
 #include "zi/zifs_security.h"
@@ -83,6 +84,19 @@ typedef struct MountSelection {
   bool redundancy_mismatch;
 } MountSelection;
 
+typedef struct ZiFsPathAccess {
+  const ZiAccessToken* token;
+  ZiAccessMask requested_access;
+} ZiFsPathAccess;
+
+static ZiStatus lookup_path_record(const ZiFsVolume* volume,
+                                   const ZiParsedPath* path,
+                                   void* block_buffer,
+                                   size_t block_buffer_size,
+                                   ZiFsFileRecord* out_record,
+                                   uint64_t* out_record_index,
+                                   const ZiFsPathAccess* access);
+
 static bool superblock_ranges_are_valid(const ZiFsSuperblock* superblock);
 static ZiStatus validate_file_record_shape(const ZiFsFileRecord* record);
 static ZiStatus validate_file_record_extents(const ZiFsVolume* volume,
@@ -117,13 +131,24 @@ static ZiStatus select_mount_superblock(const ZiFsSuperblock* primary,
                                         MountSelection* out_selection);
 static bool device_supports_zifs_writes(const ZiBlockDevice* device);
 static bool superblock_uses_journal(const ZiFsSuperblock* superblock);
+static bool superblock_uses_clean_unmount(const ZiFsSuperblock* superblock);
+static bool superblock_state_is_valid(const ZiFsSuperblock* superblock);
 static void
 assess_journal_mount_state(void* block_buffer, size_t block_buffer_size, ZiFsVolume* volume);
+static ZiStatus journal_is_checkpointed(ZiFsVolume* volume,
+                                        void* block_buffer,
+                                        size_t block_buffer_size,
+                                        bool* out_checkpointed);
+static ZiStatus write_volume_state(ZiFsVolume* volume,
+                                   uint32_t state_flags,
+                                   void* block_buffer,
+                                   size_t block_buffer_size);
+static void freeze_volume(ZiFsVolume* volume);
 
 ZiStatus ZiFsEncodeSuperblock(const ZiFsSuperblock* superblock, void* output, size_t output_size) {
   if (superblock == NULL || output == NULL || output_size < ZI_FS_BLOCK_SIZE ||
       superblock->volume_name_size > ZI_FS_MAX_VOLUME_NAME_BYTES ||
-      !superblock_ranges_are_valid(superblock)) {
+      !superblock_state_is_valid(superblock) || !superblock_ranges_are_valid(superblock)) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }
 
@@ -234,8 +259,7 @@ ZiStatus ZiFsDecodeSuperblock(const void* data, size_t data_size, ZiFsSuperblock
   if (out_superblock->format_major != ZI_FS_FORMAT_MAJOR ||
       out_superblock->format_minor > ZI_FS_FORMAT_MINOR ||
       out_superblock->block_shift != ZI_FS_BLOCK_SHIFT || out_superblock->checksum_type != 1 ||
-      out_superblock->generation == 0 ||
-      (out_superblock->state_flags & ~ZI_FS_SUPERBLOCK_STATE_SUPPORTED) != 0 ||
+      out_superblock->generation == 0 || !superblock_state_is_valid(out_superblock) ||
       !superblock_ranges_are_valid(out_superblock)) {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
   }
@@ -768,6 +792,81 @@ ZiStatus ZiFsMountVolume(const ZiBlockDevice* device,
   if (ZiFailed(status) || root_record.file_type != ZI_FS_FILE_TYPE_DIRECTORY) {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
   }
+
+  out_volume->is_mounted = 1;
+  if (out_volume->is_read_only == 0 && superblock_uses_clean_unmount(&out_volume->superblock)) {
+    status = write_volume_state(out_volume,
+                                ZI_FS_SUPERBLOCK_STATE_MOUNTED,
+                                block_buffer,
+                                block_buffer_size);
+    if (ZiFailed(status)) {
+      freeze_volume(out_volume);
+      out_volume->is_mounted = 0;
+      return status;
+    }
+  }
+  return ZI_STATUS_SUCCESS;
+}
+
+ZiStatus ZiFsFlushVolume(ZiFsVolume* volume, void* block_buffer, size_t block_buffer_size) {
+  if (volume == NULL || block_buffer == NULL || block_buffer_size < ZI_FS_BLOCK_SIZE) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  if (volume->is_mounted == 0) {
+    return ZI_STATUS_INVALID_STATE;
+  }
+  if (volume->needs_recovery != 0) {
+    return ZI_STATUS_RECOVERY_REQUIRED;
+  }
+  if (volume->is_read_only != 0) {
+    return volume->superblock.state_flags == ZI_FS_SUPERBLOCK_STATE_NONE
+               ? ZI_STATUS_SUCCESS
+               : ZI_STATUS_RECOVERY_REQUIRED;
+  }
+
+  uint32_t expected_state = ZI_FS_SUPERBLOCK_STATE_NONE;
+  if (superblock_uses_clean_unmount(&volume->superblock)) {
+    expected_state = ZI_FS_SUPERBLOCK_STATE_MOUNTED;
+  }
+  bool checkpointed = false;
+  ZiStatus status = journal_is_checkpointed(volume, block_buffer, block_buffer_size, &checkpointed);
+  if (volume->superblock.state_flags != expected_state || ZiFailed(status) || !checkpointed) {
+    freeze_volume(volume);
+    if (ZiFailed(status)) {
+      return status;
+    }
+    return ZI_STATUS_RECOVERY_REQUIRED;
+  }
+  status = zi_block_barrier(&volume->device);
+  if (ZiFailed(status)) {
+    freeze_volume(volume);
+  }
+  return status;
+}
+
+ZiStatus ZiFsUnmountVolume(ZiFsVolume* volume, void* block_buffer, size_t block_buffer_size) {
+  if (volume == NULL || block_buffer == NULL || block_buffer_size < ZI_FS_BLOCK_SIZE) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  if (volume->is_mounted == 0) {
+    return ZI_STATUS_INVALID_STATE;
+  }
+  ZiStatus status = ZiFsFlushVolume(volume, block_buffer, block_buffer_size);
+  if (ZiFailed(status)) {
+    volume->is_mounted = 0;
+    return status;
+  }
+  if (volume->is_read_only == 0 && superblock_uses_clean_unmount(&volume->superblock)) {
+    status =
+        write_volume_state(volume, ZI_FS_SUPERBLOCK_STATE_NONE, block_buffer, block_buffer_size);
+    if (ZiFailed(status)) {
+      freeze_volume(volume);
+      volume->is_mounted = 0;
+      return status;
+    }
+  }
+  volume->is_mounted = 0;
+  volume->is_read_only = 1;
   return ZI_STATUS_SUCCESS;
 }
 
@@ -857,6 +956,20 @@ static bool superblock_uses_journal(const ZiFsSuperblock* superblock) {
   return (superblock->incompatible_features & ZI_FS_FEATURE_INCOMPAT_JOURNAL_V1) != 0;
 }
 
+static bool superblock_uses_clean_unmount(const ZiFsSuperblock* superblock) {
+  return (superblock->incompatible_features & ZI_FS_FEATURE_INCOMPAT_CLEAN_UNMOUNT_V1) != 0;
+}
+
+static bool superblock_state_is_valid(const ZiFsSuperblock* superblock) {
+  if ((superblock->state_flags & ~ZI_FS_SUPERBLOCK_STATE_SUPPORTED) != 0) {
+    return false;
+  }
+  if (!superblock_uses_clean_unmount(superblock)) {
+    return (bool)((superblock->state_flags & ZI_FS_SUPERBLOCK_STATE_MOUNTED) == 0);
+  }
+  return (bool)(superblock->state_flags != ZI_FS_SUPERBLOCK_STATE_TRANSACTION_DIRTY);
+}
+
 static void
 assess_journal_mount_state(void* block_buffer, size_t block_buffer_size, ZiFsVolume* volume) {
   if (!superblock_uses_journal(&volume->superblock)) {
@@ -884,6 +997,80 @@ assess_journal_mount_state(void* block_buffer, size_t block_buffer_size, ZiFsVol
       journal_header.last_checkpoint_transaction != volume->superblock.last_committed_transaction) {
     volume->needs_recovery = 1;
   }
+}
+
+static ZiStatus journal_is_checkpointed(ZiFsVolume* volume,
+                                        void* block_buffer,
+                                        size_t block_buffer_size,
+                                        bool* out_checkpointed) {
+  if (volume == NULL || block_buffer == NULL || block_buffer_size < ZI_FS_BLOCK_SIZE ||
+      out_checkpointed == NULL || !superblock_uses_journal(&volume->superblock)) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  *out_checkpointed = false;
+  uint64_t expected_capacity = 0;
+  ZiStatus status =
+      ZiFsJournalRecordCapacity(volume->superblock.journal_blocks, &expected_capacity);
+  ZiFsJournalHeader header = {0};
+  uint32_t header_copy = 0;
+  if (ZiSucceeded(status)) {
+    status = ZiFsLoadJournalHeader(&volume->device,
+                                   volume->superblock.journal_start,
+                                   block_buffer,
+                                   block_buffer_size,
+                                   &header,
+                                   &header_copy);
+  }
+  if (ZiFailed(status)) {
+    return status;
+  }
+  if (header.record_capacity != expected_capacity ||
+      header.volume_generation != volume->superblock.generation ||
+      header.last_committed_transaction != volume->superblock.last_committed_transaction ||
+      header.last_checkpoint_transaction != header.last_committed_transaction ||
+      header.head_record != header.tail_record ||
+      header.next_transaction_id != header.last_committed_transaction + 1u) {
+    return ZI_STATUS_SUCCESS;
+  }
+  *out_checkpointed = true;
+  return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus write_volume_state(ZiFsVolume* volume,
+                                   uint32_t state_flags,
+                                   void* block_buffer,
+                                   size_t block_buffer_size) {
+  if (volume == NULL || block_buffer == NULL || block_buffer_size < ZI_FS_BLOCK_SIZE) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  ZiFsSuperblock next = volume->superblock;
+  next.state_flags = state_flags;
+  ZiStatus status = ZiFsEncodeSuperblock(&next, block_buffer, block_buffer_size);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  status =
+      zi_block_write(&volume->device, next.backup_superblock, 1, block_buffer, ZI_FS_BLOCK_SIZE);
+  if (ZiSucceeded(status)) {
+    status = zi_block_barrier(&volume->device);
+  }
+  if (ZiFailed(status)) {
+    return status;
+  }
+  status = zi_block_write(&volume->device, 0, 1, block_buffer, ZI_FS_BLOCK_SIZE);
+  if (ZiSucceeded(status)) {
+    status = zi_block_barrier(&volume->device);
+  }
+  if (ZiSucceeded(status)) {
+    volume->superblock = next;
+  }
+  return status;
+}
+
+static void freeze_volume(ZiFsVolume* volume) {
+  volume->is_read_only = 1;
+  volume->needs_recovery = 1;
+  volume->journal_header_valid = 0;
 }
 
 ZiStatus ZiFsReadFileRecord(const ZiFsVolume* volume,
@@ -1012,9 +1199,47 @@ ZiStatus ZiFsLookupPathRecord(const ZiFsVolume* volume,
                               size_t block_buffer_size,
                               ZiFsFileRecord* out_record,
                               uint64_t* out_record_index) {
+  return lookup_path_record(volume,
+                            path,
+                            block_buffer,
+                            block_buffer_size,
+                            out_record,
+                            out_record_index,
+                            NULL);
+}
+
+ZiStatus ZiFsLookupPathAuthorised(const ZiFsVolume* volume,
+                                  const ZiParsedPath* path,
+                                  const ZiAccessToken* token,
+                                  ZiAccessMask requested_access,
+                                  void* block_buffer,
+                                  size_t block_buffer_size,
+                                  ZiFsFileRecord* out_record) {
+  if (ZiFailed(zi_security_token_validate(token)) || requested_access == 0 ||
+      (requested_access & ~ZI_ACCESS_FULL_CONTROL) != 0) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  const ZiFsPathAccess access = {token, requested_access};
+  uint64_t record_index = 0;
+  return lookup_path_record(volume,
+                            path,
+                            block_buffer,
+                            block_buffer_size,
+                            out_record,
+                            &record_index,
+                            &access);
+}
+
+static ZiStatus lookup_path_record(const ZiFsVolume* volume,
+                                   const ZiParsedPath* path,
+                                   void* block_buffer,
+                                   size_t block_buffer_size,
+                                   ZiFsFileRecord* out_record,
+                                   uint64_t* out_record_index,
+                                   const ZiFsPathAccess* access) {
   if (volume == NULL || path == NULL || out_record == NULL || block_buffer == NULL ||
       out_record_index == NULL || block_buffer_size < ZI_FS_BLOCK_SIZE ||
-      path->drive_letter != 'C') {
+      path->drive_letter != 'C' || (path->component_count != 0 && path->components == NULL)) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }
 
@@ -1029,6 +1254,19 @@ ZiStatus ZiFsLookupPathRecord(const ZiFsVolume* volume,
   for (size_t index = 0; index < path->component_count; ++index) {
     if (current.file_type != ZI_FS_FILE_TYPE_DIRECTORY) {
       return ZI_STATUS_NOT_FOUND;
+    }
+    if (access != NULL) {
+      ZiAccessMask granted = 0;
+      status = ZiFsCheckSecurityAccess(volume,
+                                       current.security_id,
+                                       access->token,
+                                       ZI_ACCESS_EXECUTE,
+                                       &granted,
+                                       block_buffer,
+                                       block_buffer_size);
+      if (ZiFailed(status)) {
+        return status;
+      }
     }
     ZiFsDirectoryEntry entry = {0};
     uint64_t directory_block = 0;
@@ -1055,6 +1293,19 @@ ZiStatus ZiFsLookupPathRecord(const ZiFsVolume* volume,
     current_record_index = entry.record_index;
   }
 
+  if (access != NULL) {
+    ZiAccessMask granted = 0;
+    status = ZiFsCheckSecurityAccess(volume,
+                                     current.security_id,
+                                     access->token,
+                                     access->requested_access,
+                                     &granted,
+                                     block_buffer,
+                                     block_buffer_size);
+    if (ZiFailed(status)) {
+      return status;
+    }
+  }
   *out_record = current;
   *out_record_index = current_record_index;
   return ZI_STATUS_SUCCESS;

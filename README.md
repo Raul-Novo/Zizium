@@ -2,11 +2,20 @@
 
 Zizium is an experimental PE/COFF-native, case-sensitive operating system. It is
 UEFI-first and non-POSIX by design, with a modular monolithic kernel.
-The present milestone is **Zizium 0.2 "Luma"**.
+The present milestone is **Zizium 0.3 "ZiFS"**.
 
 This repository is a foundation, not a daily-use operating system. Booted
 vertical slices and host-tested algorithms are identified separately from
 interfaces which reserve future architecture.
+
+Phase 8 is active. Its prerequisites enforce bounded token memberships,
+inheritance-only ACE semantics, approved bootstrap service identities, restricted
+service/session groups, and launch-token ACL checks for executable/DLL sources.
+Durable accounts and logon are not implemented.
+The build now mandates `-Weverything -Werror`, with individually scoped
+exceptions documented in [the build contract](docs/build.md). Known remaining
+identity and authorisation limitations are listed in
+[security.md](docs/security.md); bootstrap sessions are not secure logon.
 
 ## Current vertical slice
 
@@ -34,15 +43,23 @@ interfaces which reserve future architecture.
   an incompatible feature bit enables exact-case directories of up to 256
   blocks through inline continuation extents; circular-journal reclamation and
   automatic rollback/replay are validated at every relevant host write/flush
-  boundary and across twenty-seven QEMU boots;
+  boundary; a separate lifecycle feature provides writable mount activation,
+  explicit flush, clean unmount, and distinct unclean-shutdown recovery, all
+  validated across thirty-two persistent QEMU boots;
 - versioned, checksummed ZiFS security descriptors with durable owner, primary
   group, ordered DACL, and ACE data; mount validates every live security
   reference and a negative QEMU boot proves corrupted policy cannot be used;
 - a strictly read-only `zifsinspect.exe` for raw volumes and GPT images. It
   reports both superblocks and journal headers, validates committed in-flight
   state through a memory-only replay overlay, walks security and namespace
-  metadata, reconciles allocation, and is covered by eleven non-mutation
-  fixtures plus clean and crash-boundary QEMU checkpoints;
+  metadata, reconciles allocation, diagnoses interrupted unmount, and is
+  covered by thirteen non-mutation fixtures plus five clean, lifecycle, and
+  crash-boundary QEMU checkpoints;
+- a separate fail-closed `zifsrepair.exe` with read-only planning, a SHA-256
+  review token, exclusive apply, per-block barriers, fixed-point inspection,
+  and repair limited to uniquely provable redundant-copy or interrupted-mount
+  faults. Unknown corruption, active transactions, security damage, namespace
+  damage, and allocation leaks are refused;
 - populated ZiFS regular files with bounded extent reads; core DLLs,
   programmes, drivers, and manifests come from ZiFS rather than Limine PE
   modules;

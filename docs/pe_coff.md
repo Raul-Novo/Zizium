@@ -46,6 +46,15 @@ complete images into kernel-pool allocations, and rolls back every allocation
 on failure. The PE mapper clears its borrowed raw-source pointers after import
 resolution so source ownership may end before execution.
 
+The source provider now requires a versioned `ZiFsImageSourceAccess` containing
+the volume and launch token. Every traversed directory requires Execute before
+its entries are inspected; every final image requires Read and Execute before
+payload allocation. Missing/malformed access contexts fail explicitly. A failed
+later source unwinds the entire temporary set. Core DLLs are loaded and checked
+independently for each acceptance process. This eager path assumes stable,
+kernel-owned token/request storage and the existing serialised volume access;
+concurrent mutation/revocation needs a future file-object locking contract.
+
 The QEMU smoke test dynamically maps those dependencies from ZiFS and executes
 the three acceptance programmes, four core service hand-off programmes,
 SessionHost, user-mode Luma, and Luma's nested child. The main images are

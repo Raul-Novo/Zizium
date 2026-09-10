@@ -41,6 +41,10 @@ _Static_assert(sizeof(ZiPoolBlockHeader) % ZI_POOL_ALIGNMENT == 0,
                "Pool headers must preserve allocation alignment.");
 _Static_assert(sizeof(ZiObjectSlotHeader) % ZI_POOL_ALIGNMENT == 0,
                "Object-cache headers must preserve allocation alignment.");
+_Static_assert(ZI_POOL_ALIGNMENT % _Alignof(ZiPoolBlockHeader) == 0,
+               "Pool storage must satisfy block-header alignment.");
+_Static_assert(ZI_POOL_ALIGNMENT % _Alignof(ZiObjectSlotHeader) == 0,
+               "Pool storage must satisfy object-slot alignment.");
 
 static ZiStatus allocation_span(size_t requested_size, size_t* out_span);
 static bool bytes_are_zero(const unsigned char* bytes, size_t size);
@@ -146,8 +150,9 @@ ZiStatus zi_pool_allocate(ZiPool* pool, size_t size, void** out_allocation) {
   size_t remainder_span = original_span - required_span;
   if (remainder_span >= minimum_span) {
     block->span = required_span;
-    ZiPoolBlockHeader* remainder_block =
-        (ZiPoolBlockHeader*)((unsigned char*)block + required_span);
+    // allocation_span rounds to ZI_POOL_ALIGNMENT within the validated arena.
+    void* remainder_storage = pool->arena + offset + required_span;
+    ZiPoolBlockHeader* remainder_block = remainder_storage;
     size_t previous_span = required_span;
     initialise_free_block(pool,
                           remainder_block,
@@ -533,14 +538,18 @@ static ZiStatus cache_slot_stride(size_t object_size, size_t* out_stride) {
 }
 
 static ZiPoolBlockHeader* first_block(const ZiPool* pool) {
-  return (ZiPoolBlockHeader*)pool->arena;
+  // Initialisation and descriptor validation check the backing storage alignment.
+  void* storage = pool->arena;
+  return storage;
 }
 
 static ZiPoolBlockHeader* next_block(const ZiPool* pool, ZiPoolBlockHeader* block, size_t offset) {
   if (block->span > pool->arena_size - offset || offset + block->span == pool->arena_size) {
     return NULL;
   }
-  return (ZiPoolBlockHeader*)(pool->arena + offset + block->span);
+  // pool_scan validates every span as an aligned, in-arena storage interval.
+  void* storage = pool->arena + offset + block->span;
+  return storage;
 }
 
 static ZiPoolBlockHeader*
@@ -551,7 +560,8 @@ previous_block(const ZiPool* pool, ZiPoolBlockHeader* block, size_t offset) {
   if (block->previous_span > offset) {
     return NULL;
   }
-  return (ZiPoolBlockHeader*)(pool->arena + offset - block->previous_span);
+  void* storage = pool->arena + offset - block->previous_span;
+  return storage;
 }
 
 static void initialise_free_block(const ZiPool* pool,
@@ -602,7 +612,9 @@ static ZiStatus pool_scan(const ZiPool* pool, ZiPoolStatistics* out_statistics) 
     if (pool->arena_size - offset < sizeof(ZiPoolBlockHeader)) {
       return ZI_STATUS_MEMORY_CORRUPTION;
     }
-    const ZiPoolBlockHeader* block = (const ZiPoolBlockHeader*)(pool->arena + offset);
+    // The arena is aligned; offset starts at zero and advances by checked aligned spans.
+    const void* storage = pool->arena + offset;
+    const ZiPoolBlockHeader* block = storage;
     if (block->magic != ZI_POOL_BLOCK_MAGIC || block->previous_span != previous_span ||
         block->span < sizeof *block + ZI_POOL_TAIL_SIZE + 1u ||
         (block->span & (ZI_POOL_ALIGNMENT - 1u)) != 0 || block->span > pool->arena_size - offset ||
@@ -658,7 +670,9 @@ static void refresh_block_checksum(const ZiPool* pool, ZiPoolBlockHeader* block,
 }
 
 static ZiObjectSlotHeader* slot_at(const ZiObjectCache* cache, size_t index) {
-  return (ZiObjectSlotHeader*)(cache->storage + (index * cache->slot_stride));
+  // Validated pool storage and slot_stride preserve ZI_POOL_ALIGNMENT.
+  void* storage = cache->storage + (index * cache->slot_stride);
+  return storage;
 }
 
 static unsigned char* slot_object(ZiObjectSlotHeader* slot) {
@@ -668,6 +682,7 @@ static unsigned char* slot_object(ZiObjectSlotHeader* slot) {
 static ZiStatus object_cache_descriptor_validate(const ZiObjectCache* cache) {
   if (cache == NULL || cache->struct_size != sizeof(ZiObjectCache) ||
       cache->version != ZI_OBJECT_CACHE_VERSION || cache->pool == NULL || cache->storage == NULL ||
+      ((uintptr_t)cache->storage & (uintptr_t)(ZI_POOL_ALIGNMENT - 1u)) != 0 ||
       cache->object_size == 0 || cache->capacity == 0 || cache->capacity > UINT32_MAX) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }

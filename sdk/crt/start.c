@@ -13,8 +13,11 @@ extern int ZiCrtInvokeMain(int argument_count, char** arguments);
 static const char k_zicrt_image_identity[] = "ZiCRT";
 static const char* volatile s_zicrt_relocation_anchor = k_zicrt_image_identity;
 
-// The assembly start-up object resolves this external PE entry bridge by name.
-// NOLINTNEXTLINE(misc-use-internal-linkage)
+// Entry supplied to the assembly start-up bridge, not called by programme code.
+// NOLINTNEXTLINE(misc-use-internal-linkage) -- assembly resolves this bridge by name.
+_Noreturn void ZiCrtStartC(const ZiProcessParameters* parameters);
+
+// NOLINTNEXTLINE(misc-use-internal-linkage) -- assembly resolves this bridge by name.
 _Noreturn void ZiCrtStartC(const ZiProcessParameters* parameters) {
   ZiStatus status = s_zicrt_relocation_anchor != NULL ? ZiCrtInitialiseProcess(parameters)
                                                       : ZI_STATUS_BAD_IMAGE_FORMAT;

@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "zi/path.h"
 #include "zi/security.h"
 #include "zi/zifs.h"
 #include "zizium/status.h"
@@ -43,6 +44,18 @@ typedef struct ZiFsSecurityDescriptorStorage {
   ZiAcl dacl;
   ZiAce entries[ZI_FS_SECURITY_MAXIMUM_ACES];
 } ZiFsSecurityDescriptorStorage;
+
+// Requires stable kernel-owned path/token storage and externally serialised volume access.
+// Checks Execute on each traversed directory before reading its entries, then the requested
+// rights on the final record. There is no privileged or missing-token bypass.
+// Output changes only on success. Raw ZiFsLookupPath remains a trusted metadata primitive.
+ZiStatus ZiFsLookupPathAuthorised(const ZiFsVolume* volume,
+                                  const ZiParsedPath* path,
+                                  const ZiAccessToken* token,
+                                  ZiAccessMask requested_access,
+                                  void* block_buffer,
+                                  size_t block_buffer_size,
+                                  ZiFsFileRecord* out_record);
 
 ZiStatus ZiFsInitialiseSecurityTable(void* table, size_t table_size, uint64_t generation);
 ZiStatus ZiFsAppendSecurityDescriptor(void* table,

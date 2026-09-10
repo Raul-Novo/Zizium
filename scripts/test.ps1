@@ -12,6 +12,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $driverPath = Join-Path $PSScriptRoot 'build_driver.py'
+. (Join-Path $PSScriptRoot 'enter_toolchain.ps1')
 $selectedModes = 0
 if ($Boot) { ++$selectedModes }
 if ($Fault) { ++$selectedModes }

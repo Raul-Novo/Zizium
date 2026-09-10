@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "zi/byte_order.h"
 #include "zi/display.h"
 #include "zi/font.h"
 #include "zi/terminal.h"
@@ -171,9 +172,9 @@ fill_rectangle(uint32_t x, uint32_t y, uint32_t width, uint32_t height, ZiColour
   uint32_t pixel = pack_colour(colour);
   unsigned char* base = g_framebuffer.address;
   for (uint32_t row = 0; row < height; ++row) {
-    uint32_t* pixels = (uint32_t*)(base + ((size_t)(y + row) * g_framebuffer.pitch));
+    unsigned char* pixels = base + ((size_t)(y + row) * g_framebuffer.pitch);
     for (uint32_t column = 0; column < width; ++column) {
-      pixels[x + column] = pixel;
+      zi_write_u32_le(pixels + ((size_t)(x + column) * sizeof pixel), pixel);
     }
   }
 }

@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $driverPath = Join-Path $PSScriptRoot 'build_driver.py'
+. (Join-Path $PSScriptRoot 'enter_toolchain.ps1')
 
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
   throw 'Python 3 is required. Install Python and ensure python.exe is on PATH.'

@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "zi/security.h"
 #include "zi/user_image.h"
 #include "zi/zifs.h"
 #include "zizium/status.h"
@@ -12,6 +13,7 @@
 
 #define ZI_FS_IMAGE_SOURCE_ALLOCATOR_VERSION 1u
 #define ZI_FS_IMAGE_SOURCE_SET_VERSION 1u
+#define ZI_FS_IMAGE_SOURCE_ACCESS_VERSION 1u
 #define ZI_FS_IMAGE_SOURCE_CAPACITY ZI_USER_IMAGE_SET_CAPACITY
 #define ZI_FS_IMAGE_PATH_COMPONENT_CAPACITY 32u
 
@@ -33,6 +35,13 @@ typedef struct ZiFsImageSourceRequest {
   ZiStringView file_path;
 } ZiFsImageSourceRequest;
 
+typedef struct ZiFsImageSourceAccess {
+  uint32_t struct_size;
+  uint32_t version;
+  const ZiFsVolume* volume;
+  const ZiAccessToken* token;
+} ZiFsImageSourceAccess;
+
 typedef struct ZiFsImageSourceSet {
   uint32_t struct_size;
   uint32_t version;
@@ -42,7 +51,10 @@ typedef struct ZiFsImageSourceSet {
   size_t total_size;
 } ZiFsImageSourceSet;
 
-ZiStatus zi_zifs_image_source_set_load(const ZiFsVolume* volume,
+// Access/token and request storage must remain stable through lookup and file reads.
+// The current single-writer bootstrap serialises mutations outside this operation.
+// Every source requires directory traversal and Read/Execute rights under this token.
+ZiStatus zi_zifs_image_source_set_load(const ZiFsImageSourceAccess* access,
                                        const ZiFsImageSourceRequest* requests,
                                        size_t request_count,
                                        const ZiFsImageSourceAllocator* allocator,

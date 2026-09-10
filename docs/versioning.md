@@ -18,7 +18,9 @@ Release channels are Stable, Preview, and Nightly.
 
 The kernel, tools, PE placeholders, ZiFS header, structures, service manifests,
 and dependency manifest carry explicit version values where needed. The target
-name is `x86_64-pc-zizium-pe`.
+name is `x86_64-pc-zizium-pe`. The verified repository now reaches the Phase 7
+engineering boundary associated with the Zizium 0.3 “ZiFS” milestone. This is
+an implementation milestone, not a signed or publicly supported release.
 
 ## Scaffolded
 

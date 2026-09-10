@@ -69,3 +69,5 @@ typedef struct ZiBootContext {
 } ZiBootContext;
 
 ZiStatus zi_boot_context_from_limine(const ZiBootContext** out_context);
+// Microsoft x64 entry reached only through the architecture's loader ABI bridge.
+_Noreturn void ZkKernelMain(void);

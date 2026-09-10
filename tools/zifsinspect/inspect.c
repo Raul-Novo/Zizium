@@ -153,6 +153,11 @@ ZiStatus zifs_inspect_volume(const ZiBlockDevice* device, ZiFsInspectReport* out
     return ZI_STATUS_INVALID_ARGUMENT;
   }
 
+  ZiBlockDevice read_only_device = *device;
+  read_only_device.write_blocks = NULL;
+  read_only_device.flush = NULL;
+  read_only_device.flags = ZI_BLOCK_DEVICE_READ_ONLY;
+
   ZiFsInspectReport report = {0};
   report.struct_size = sizeof report;
   report.version = ZIFS_INSPECT_REPORT_VERSION;
@@ -170,7 +175,7 @@ ZiStatus zifs_inspect_volume(const ZiBlockDevice* device, ZiFsInspectReport* out
   unsigned char block_buffer[ZI_FS_JOURNAL_RECORD_SIZE] = {0};
   ZiFsVolume volume = {0};
   ZiStatus status =
-      inspect_superblocks(device, block_buffer, sizeof block_buffer, &volume, &report);
+      inspect_superblocks(&read_only_device, block_buffer, sizeof block_buffer, &volume, &report);
   if (ZiFailed(status) && volume.superblock.total_blocks == 0) {
     report.overall_status = status;
     *out_report = report;
@@ -323,6 +328,15 @@ static ZiStatus inspect_journal(const ZiFsVolume* volume,
     return status;
   }
   if (report->occupied_journal_records == 0) {
+    if ((volume->superblock.incompatible_features & ZI_FS_FEATURE_INCOMPAT_CLEAN_UNMOUNT_V1) != 0 &&
+        volume->superblock.state_flags == ZI_FS_SUPERBLOCK_STATE_MOUNTED &&
+        report->journal.volume_generation == volume->superblock.generation &&
+        report->journal.last_checkpoint_transaction ==
+            volume->superblock.last_committed_transaction &&
+        report->journal.last_committed_transaction != UINT64_MAX &&
+        report->journal.next_transaction_id == report->journal.last_committed_transaction + 1u) {
+      report->unclean_mount = 1;
+    }
     return ZI_STATUS_SUCCESS;
   }
   report->needs_recovery = 1;

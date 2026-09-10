@@ -16,11 +16,14 @@ bool zi_security_id_equal(ZiSecurityId left, ZiSecurityId right) {
 ZiStatus zi_security_token_validate(const ZiAccessToken* token) {
   if (token == NULL || token->struct_size != sizeof *token ||
       token->version != ZI_ACCESS_TOKEN_VERSION || ZiFailed(zi_security_id_validate(token->user)) ||
+      token->user.authority == ZI_SECURITY_AUTHORITY_GROUP ||
+      token->group_count > ZI_SECURITY_MAXIMUM_TOKEN_GROUPS ||
       (token->groups == NULL && token->group_count != 0)) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }
   for (size_t index = 0; index < token->group_count; ++index) {
-    if (ZiFailed(zi_security_id_validate(token->groups[index]))) {
+    if (ZiFailed(zi_security_id_validate(token->groups[index])) ||
+        token->groups[index].authority != ZI_SECURITY_AUTHORITY_GROUP) {
       return ZI_STATUS_INVALID_ARGUMENT;
     }
     for (size_t previous = 0; previous < index; ++previous) {
@@ -94,7 +97,8 @@ ZiStatus zi_security_access_check(const ZiSecurityDescriptor* descriptor,
   ZiAccessMask granted_access = 0;
   for (size_t index = 0; index < descriptor->dacl->entry_count; ++index) {
     const ZiAce* entry = &descriptor->dacl->entries[index];
-    if (!token_contains_id(token, entry->trustee)) {
+    if ((entry->inheritance_flags & ZI_ACE_INHERIT_ONLY) != 0 ||
+        !token_contains_id(token, entry->trustee)) {
       continue;
     }
 

@@ -13,7 +13,10 @@ and has a non-returning panic path. Reproducible links retain a PDB. `pecheck`
 inspects bounded PE metadata. `zifsinspect` reads raw ZiFS volumes or their GPT
 partition without write capability and reports redundant superblocks, journal
 headers and records, security descriptors, namespace/linkage, extents, and
-allocation accounting.
+allocation accounting. The separate `zifsrepair` tool consumes the same
+full-volume evidence but writes only reviewed, uniquely provable redundancy
+or lifecycle repairs. It recomputes the plan before apply and never treats a
+refused state as repaired.
 
 All architectural exceptions enter one C frame contract. Fatal diagnostics
 switch to bounded serial-only output and include vector, error code, RIP, CS,
@@ -34,14 +37,23 @@ second corrupts both GPT header CRCs. Each must reject direct mounting, emit an
 exact reason marker, enter only the explicit recovery path, and still reach
 Luma without a panic.
 
-ZiFS inspection has three real checkpoints in `make zifs-test`: a clean
-post-create volume, a committed transaction stopped before checkpoint, and a
-clean grown file plus multi-block directory. The committed checkpoint is
-validated through a memory-only journal replay overlay and must report recovery
-required. Eleven host fixtures cover a valid ordinary volume, a valid
-formatter-created multi-block directory, redundant-copy degradation,
-checksums, namespace metadata, and allocation corruption; every fixture is
-hashed before and after inspection to enforce the read-only contract.
+ZiFS inspection has five real checkpoints in `make zifs-test`: a cleanly
+unmounted volume, an interrupted unmount, a clean post-create volume, a
+committed transaction stopped before checkpoint, and a clean grown file plus
+multi-block directory. The interrupted-unmount report identifies the valid
+mounted state without inventing an active transaction. The committed
+checkpoint is validated through a memory-only journal replay overlay and must
+report recovery required. Thirteen host fixtures cover a valid ordinary volume,
+a valid formatter-created multi-block directory, a valid unclean mount,
+redundant-copy degradation, checksums, namespace metadata, and allocation
+corruption; every fixture is hashed before and after inspection to enforce the
+read-only contract.
+
+Repair acceptance exercises raw and GPT containers, clean fixed points, four
+repairable metadata combinations, wrong and stale review tokens, three refused
+corruption classes, UTF-16 paths, and every write/barrier boundary of a
+combined three-action plan. A persistent QEMU image is repaired offline and
+then boots through the direct ZiFS partition without recovery markers.
 
 ## Scaffolded
 

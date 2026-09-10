@@ -5,6 +5,16 @@ uses fixed 4 KiB blocks, exact validated UTF-8 names, explicit byte encoding,
 and CRC32C metadata checksums. Native paths are case-sensitive and apply no
 implicit Unicode normalisation or case folding.
 
+The trusted raw metadata lookup remains available for mounting and maintenance.
+`ZiFsLookupPathAuthorised` shares its traversal implementation but requires a
+validated token: Execute on root and every intermediate directory, then the
+requested nonzero rights on the final record. The EXE/DLL provider always uses
+this authorised entry with Read/Execute. List is enumeration, not a substitute
+for traversal. Checks happen before a protected directory's entries are read;
+an empty DACL denies even if downstream entries are corrupt. Caller-owned token,
+path and scratch storage must remain stable and volume mutations serialised.
+This is not a general user file-object API or concurrent revocation mechanism.
+
 The frozen GPT partition type GUID is
 `9ef9e22a-3719-44d4-89af-de9cc7b6b255`.
 
@@ -38,7 +48,7 @@ disagreement as requiring repair.
 | 168 | 2 | UTF-8 volume-name byte count |
 | 172 | 64 | volume-name bytes |
 | 236 | 8 | last committed transaction ID |
-| 244 | 4 | state flags; bit 0 means dirty |
+| 244 | 4 | state flags; bit 0 means transaction dirty, bit 1 means mounted |
 | 252 | 4 | CRC32C over bytes 0–251 |
 
 Unknown compatible features may be ignored. Unknown read-only-compatible
@@ -46,9 +56,23 @@ features require a read-only mount. Unknown incompatible features reject the
 mount. Incompatible bit 0 identifies the version-one journal contract, bit 1
 identifies the version-one durable security-table contract, and bit 2
 (`ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1`) identifies the directory
-continuation contract below. All three bits are required by newly formatted
+continuation contract below. Bit 3
+(`ZI_FS_FEATURE_INCOMPAT_CLEAN_UNMOUNT_V1`) identifies the explicit mounted and
+cleanly-unmounted state machine. All four bits are required by newly formatted
 Seed volumes. All metadata regions must fit, must not overlap, and must exclude
 both superblocks.
+
+With clean-unmount feature bit 3 present, the supported states are:
+
+| State flags | Meaning |
+| ---: | --- |
+| `0` | cleanly unmounted |
+| `MOUNTED` | activated by one writable mount, with no transaction in flight |
+| `MOUNTED | TRANSACTION_DIRTY` | a transaction requires rollback or replay |
+
+`TRANSACTION_DIRTY` without `MOUNTED`, unknown bits, and all other
+combinations are invalid. Earlier version-one volumes without feature bit 3
+retain their legacy `0`/`DIRTY` interpretation and never accept `MOUNTED`.
 
 ## File records, extents, and directories
 
@@ -266,11 +290,12 @@ record even when the sequence crosses slot 31 to slot 0.
 The implemented single-writer transactions use this durable order:
 
 1. Write `BEGIN` and every redo block image, then flush.
-2. Write backup and primary dirty superblocks, flushing each copy.
+2. Write backup and primary mounted-plus-transaction-dirty superblocks,
+   flushing each copy.
 3. Write `COMMIT`, then flush.
 4. Publish the committed redundant journal header, then flush.
 5. Write every home block, then flush.
-6. Write clean backup and primary superblocks, flushing each copy.
+6. Write stable mounted backup and primary superblocks, flushing each copy.
 7. Write `CHECKPOINT`, then flush.
 8. Publish the second clean journal header with `tail == head`, then flush.
 
@@ -286,6 +311,32 @@ ring cursors to the slot after `CHECKPOINT`. The next serial transaction starts
 at that cursor and may wrap. This is bounded single-writer reclamation; there
 is no concurrent writer, retained multi-transaction history, or background
 checkpoint worker.
+
+## Mount, flush, and clean-unmount ordering
+
+A newly formatted feature-bit-3 volume is cleanly unmounted. Read-only mounts
+validate this state but never mutate it. A successful writable mount first
+validates recovery, the root record, and all durable security references, then
+activates the volume by writing `MOUNTED` to the backup superblock, flushing,
+writing the primary, and flushing again. The volume is not published to its
+caller until that sequence succeeds.
+
+`ZiFsFlushVolume` accepts only a mounted, non-recovery volume with the expected
+stable state and a valid empty, checkpointed journal. It issues a device
+barrier; it does not claim to flush a cache because ZiFS has no cache yet.
+`ZiFsUnmountVolume` first performs that explicit flush, then writes state zero
+to the backup superblock, flushes, writes the primary, flushes, and closes the
+volume. A read-only volume closes without any write. A failed activation,
+flush, or unmount freezes the volume read-only, marks recovery required, and
+prevents further transactions; unsupported or uncertain durability is never
+reported as success.
+
+If boot finds `MOUNTED` with a valid empty checkpointed journal, recovery
+classifies an unclean shutdown without an in-flight transaction, clears both
+superblocks to state zero in backup-first order, and reports the distinct
+`RECOVERED_UNCLEAN_MOUNT` action. A mounted dirty state still follows the
+existing transaction rollback or replay rules. Recovery produces a clean,
+unmounted volume; a subsequent writable mount must activate it explicitly.
 
 ## Implemented
 
@@ -325,6 +376,10 @@ checkpoint worker.
 - The write-ahead commit and single-transaction mount recovery paths implement
   rollback, replay, redundant-superblock repair, root validation, circular
   record addressing, and checkpoint reclamation.
+- Writable mount activation, explicit durable flush, clean unmount, and
+  unclean-shutdown recovery implement the feature-bit-3 lifecycle above.
+  Backup-first superblock transitions and every intervening flush are covered
+  by host fault injection. Read-only mounts remain non-mutating.
 - `zifsinspect.exe` opens either a raw ZiFS volume or the frozen-GUID partition
   in a GPT image through a read-only block device. It reports each superblock
   and journal-header copy, selects valid redundant state, validates journal
@@ -333,6 +388,15 @@ checkpoint worker.
   A valid committed transaction is applied only to a heap-owned replay overlay
   so the prospective recovered metadata can be checked without changing the
   inspected image. The tool performs neither recovery writes nor repair.
+- `zifsrepair.exe` is a separate offline utility with read-only `plan` and
+  exclusive `apply` commands. It repairs only a uniquely selected stale or
+  invalid superblock copy, a stale or invalid journal-header copy, or a
+  transaction-free interrupted mount. The exact expected and replacement
+  block images are bound to a SHA-256 review token; apply replans, checks the
+  token, writes in durability order with a barrier after every block, and
+  requires a clean fixed-point inspection. Active transactions, ambiguous
+  redundancy, security or namespace damage, extent errors, and allocation
+  leaks are refused.
 - Host tests inject failure before every write or flush in a 29-operation
   five-image commit and every one of the 23 operations in a transaction that
   begins at slot 30 and crosses slot 31 to slot 0. Every restart must expose
@@ -351,8 +415,11 @@ checkpoint worker.
   first one-block-to-two-block directory expansion receives the same exhaustive
   fault campaign; rollback must leave its name and allocation absent, while
   replay/commit must expose the second block and exact path together.
-- `make zifs-test` boots the real NVMe partition twenty-seven times: the original
-  clean create/reboot, rollback, replay, wrap, and post-wrap cases; clean
+- `make zifs-test` boots the real NVMe partition thirty-two times. Its first
+  four boots prove clean unmount plus reboot without recovery, then interrupt
+  unmount after the first durability boundary and require distinct unclean-
+  shutdown recovery. The remaining cases cover the original clean
+  create/reboot, rollback, replay, wrap, and post-wrap cases; clean
   case-only rename plus cross-directory move and reboot; a clean regular-file
   growth plus 18 long-name creates that force directory expansion and a reboot
   which revalidates every exact path and byte; move rollback/replay;
@@ -364,17 +431,25 @@ checkpoint worker.
   presence/absence and allocation reuse. The final negative boot corrupts a
   durable ACE byte on the direct partition, requires
   `ZIFS_SECURITY_CORRUPTION_SAFE`, forbids `ZIFS_DIRECT`, and permits only the
-  explicitly requested uncorrupted recovery module.
+  explicitly requested uncorrupted recovery module. The additional offline-
+  repair case damages one superblock and one journal-header copy while leaving
+  a transaction-free mounted marker, applies the three-action reviewed repair
+  to that GPT image, verifies an empty second plan, and boots the direct
+  partition without a recovery marker.
 - Inspector acceptance covers one valid image, one valid formatter-created
-  multi-block directory image, and nine independent corruption or redundancy
-  cases: primary superblock, one journal header, both journal headers,
+  multi-block directory image, and ten independent corruption, lifecycle, or
+  redundancy cases: interrupted clean unmount, primary superblock, one journal
+  header, both journal headers,
   security-record checksum, directory checksum, file-record checksum, a
   cleared required allocation bit, an allocated but unreferenced block, and an
-  allocation-padding bit. SHA-256 is compared before and after every case.
-  The QEMU suite also inspects the GPT partition after clean creation, at a
-  committed pre-checkpoint crash boundary, and after file/directory growth;
-  the crash case must require recovery while validating the memory-only replay
-  view, while both clean cases must validate on-disk home blocks.
+  allocation-padding bit, plus a valid volume reached through a spaced,
+  non-ASCII UTF-16 host path. SHA-256 is compared before and after every case.
+  The QEMU suite also inspects the GPT partition after clean unmount, at an
+  interrupted unmount boundary, after clean creation, at a committed pre-
+  checkpoint crash boundary, and after file/directory growth. The interrupted
+  cases must require recovery while the transaction crash validates the
+  memory-only replay view; all inspections must leave the image byte-for-byte
+  unchanged.
 
 ## Scaffolded or limited
 
@@ -393,8 +468,11 @@ checkpoint worker.
 - The security table is bounded to 16 blocks, 255 descriptors, and 12 inline
   ACEs per descriptor. Descriptor mutation, deduplication, inheritance
   application, and journalled ACL updates are not implemented.
-- There is no public clean-unmount operation, cache, or repair utility. The
-  inspector is deliberately read-only and cannot make a volume mountable.
+- There is no cache. The inspector is deliberately read-only. The repair
+  utility handles only the enumerated redundancy and lifecycle states; it is
+  not a general reconstruction or salvage facility. Flush/unmount are kernel
+  filesystem interfaces, not yet public file-object or user-mode volume-control
+  APIs.
 
 ## Future
 
@@ -402,5 +480,5 @@ Directory deletion, continuation compaction/reclamation, replacement moves,
 multiple/concurrent writers, sparse writes, overflow extents, retained
 multi-transaction journal history, background checkpointing, torn-record
 redundancy, snapshots, compression, encryption, quotas, checksummed trees,
-clean-unmount semantics, and repair policy/tooling remain unimplemented.
+and general reconstruction/salvage remain unimplemented.
 ZiFS 0.1 is experimental and must not hold irreplaceable data.

@@ -9,12 +9,20 @@ Reserved locations include `C:\Recovery`, `C:\Recovery\Rollback`, and
 
 ## Implemented in Seed
 
-Only the directory hierarchy and service-manifest boundaries exist.
+ZiFS has transaction rollback/replay, redundant-superblock selection and
+repair, explicit flush and clean-unmount state, and automatic recovery of a
+valid transaction-free interrupted mount. A separate offline host utility can
+repair only uniquely provable superblock redundancy, journal-header
+redundancy, and transaction-free interrupted-mount states through a reviewed
+plan/apply boundary. These are filesystem durability primitives, not a system
+update, data-salvage, or general reconstruction facility. The directory
+hierarchy and service-manifest boundaries also exist.
 
 ## Scaffolded
 
 UpdateHost, PackageHost, CrashHost, recovery directories, journal space, and
-package rollback metadata establish intended ownership.
+package rollback metadata establish intended ownership. No native recovery UI
+or user-mode repair service exists.
 
 ## Future
 

@@ -520,7 +520,7 @@ static bool message_is_valid(const ZiMessage* message) {
   if (message == NULL || message->struct_size != sizeof *message ||
       message->version != ZI_IPC_MESSAGE_VERSION ||
       message->payload_size > ZI_IPC_INLINE_PAYLOAD_CAPACITY ||
-      (message->flags & ~ZI_MESSAGE_TRANSFER_HANDLE) != 0 || message->reserved != 0) {
+      (message->flags & ~(uint32_t)ZI_MESSAGE_TRANSFER_HANDLE) != 0 || message->reserved != 0) {
     return false;
   }
   if ((message->flags & ZI_MESSAGE_TRANSFER_HANDLE) != 0) {

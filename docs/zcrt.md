@@ -37,6 +37,10 @@ SessionHost, Luma, and Luma's ordinary-C child from ZiFS. The child source uses
 only standard `main(void)` and `stdio.h`; it does not include `zizium.h` or use
 `ZiMain`.
 
+The C entry bridge and kernel compiler-support memory routines now have
+explicit prototypes. Native and host compiler paths inherit the same strict
+diagnostic policy; this does not expand ZiCRT's implemented C-library surface.
+
 ## Scaffolded
 
 The implemented bootstrap sequence is:

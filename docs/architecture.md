@@ -2,7 +2,7 @@
 
 ## Scope
 
-Zizium 0.2 “Luma” is an x86-64, UEFI-first, PE/COFF-native operating-system
+Zizium 0.3 “ZiFS” is an x86-64, UEFI-first, PE/COFF-native operating-system
 foundation. It is non-POSIX by design. Its kernel is modular monolithic: core
 executive, memory, I/O, filesystem, security, and loader components share one
 privileged address space, while their interfaces remain separately owned and
@@ -23,6 +23,14 @@ PE32+ is the native executable container. ZiFS is the native system volume.
 FAT32 is permitted only on the firmware-required EFI System Partition. Native
 paths use drive letters and backslashes, preserve spaces, and compare validated
 UTF-8 byte sequences exactly.
+
+Phase 8 prerequisite work enforces token role/count limits and inheritance-only
+ACE filtering, explicit bootstrap service launch policy, restricted memberships,
+and directory/EXE/DLL authorisation under the launch token. The
+[security contract](security.md) records remaining identity, authentication and
+concurrent authorisation requirements; this is not yet a
+secure multi-user platform. All compilation paths inherit the strict warning
+policy described in [build.md](build.md).
 
 ## Implemented in Seed
 
@@ -55,7 +63,10 @@ UTF-8 byte sequences exactly.
   wraps record addressing, reclaims through each checkpoint, and automatically
   rolls back or replays. Host tests cover every relevant ordinary, wrapped,
   write-growth, first-directory-expansion, rename, move, truncate, and delete
-  write/flush boundary; twenty-seven QEMU boots prove persistence, both crash
+  write/flush boundary. A second incompatible feature freezes writable mount
+  activation, explicit barrier flush, backup-first clean unmount, read-only
+  non-mutation, and distinct unclean-shutdown recovery. Thirty-two QEMU boots
+  prove lifecycle persistence, both crash
   outcomes, multi-block directory lookup, durable security-descriptor
   enforcement, and fail-closed rejection of a corrupted security table on the
   real partition path.
@@ -63,6 +74,11 @@ UTF-8 byte sequences exactly.
   both redundant metadata copies, active journal state, the durable security
   table, namespace and extent ownership, and allocation accounting. Committed
   pre-checkpoint metadata is checked through a memory-only replay overlay.
+- A separate offline repair tool plans only uniquely provable redundant-copy
+  and transaction-free interrupted-mount repairs, binds the exact replacement
+  blocks to a SHA-256 review token, applies them exclusively with a barrier per
+  block, and requires a complete clean fixed-point inspection. It refuses
+  active journals and security, namespace, extent, or allocation corruption.
 - A kernel-owned GDT, 64-bit TSS, dedicated catastrophic-exception IST stacks,
   a complete IDT, and a single 176-byte C interrupt-frame contract.
 - Bounded exception diagnostics with automated invalid-opcode, ordinary
@@ -136,9 +152,11 @@ UTF-8 byte sequences exactly.
   rename/move, one shrink-only truncate, or one regular-file delete.
   Directories are limited to 256 blocks and four inline continuation extents;
   directory deletion/reclamation, sparse writes, overflow extents, ACL
-  mutation/inheritance, clean unmount, repair tooling, and general file I/O
-  APIs are not implemented. Durable ACL records themselves are implemented and
-  checked at mount.
+  mutation/inheritance and general file I/O APIs are not implemented. The
+  bounded host repair utility is implemented, but general reconstruction and
+  salvage are deliberately unsupported. Durable ACL records and the filesystem-level clean-unmount
+  lifecycle are implemented and checked at mount; no user-mode volume-control
+  API exists yet.
 
 ## Future
 

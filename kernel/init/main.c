@@ -88,6 +88,10 @@ typedef enum ZiFsBootTestMode {
   ZIFS_BOOT_TEST_MODE_DELETE_VERIFY_NEW = 23,
   ZIFS_BOOT_TEST_MODE_GROW_DIRECTORY = 24,
   ZIFS_BOOT_TEST_MODE_GROW_DIRECTORY_VERIFY = 25,
+  ZIFS_BOOT_TEST_MODE_CLEAN_UNMOUNT = 26,
+  ZIFS_BOOT_TEST_MODE_CLEAN_UNMOUNT_VERIFY = 27,
+  ZIFS_BOOT_TEST_MODE_UNMOUNT_CRASH = 28,
+  ZIFS_BOOT_TEST_MODE_UNMOUNT_RECOVER = 29,
 } ZiFsBootTestMode;
 
 typedef struct ZiFsBootTestSelection {
@@ -214,6 +218,10 @@ static const ZiFsBootTestSelection k_zifs_boot_test_selections[] = {
     {"zi.test=zifs-delete-verify-new", ZIFS_BOOT_TEST_MODE_DELETE_VERIFY_NEW},
     {"zi.test=zifs-grow-directory", ZIFS_BOOT_TEST_MODE_GROW_DIRECTORY},
     {"zi.test=zifs-grow-directory-verify", ZIFS_BOOT_TEST_MODE_GROW_DIRECTORY_VERIFY},
+    {"zi.test=zifs-clean-unmount", ZIFS_BOOT_TEST_MODE_CLEAN_UNMOUNT},
+    {"zi.test=zifs-clean-unmount-verify", ZIFS_BOOT_TEST_MODE_CLEAN_UNMOUNT_VERIFY},
+    {"zi.test=zifs-unmount-crash", ZIFS_BOOT_TEST_MODE_UNMOUNT_CRASH},
+    {"zi.test=zifs-unmount-recover", ZIFS_BOOT_TEST_MODE_UNMOUNT_RECOVER},
 };
 
 static ZiFsVolume g_root_volume;
@@ -274,6 +282,8 @@ static ZiStatus consider_zifs_boot_test_mode(const char* command_line,
                                              ZiFsBootTestMode* mode);
 static ZiStatus failure_status_or(ZiStatus status, ZiStatus fallback);
 static ZiStatus run_requested_zifs_test(const ZiBootContext* context);
+static ZiStatus flush_and_unmount_root_volume(void);
+static ZiStatus complete_zifs_boot_test(const char* marker);
 static ZiStatus verify_zifs_test_file(bool expected_present);
 static ZiStatus run_zifs_wrap_create(void);
 static ZiStatus run_zifs_wrap_verify(void);
@@ -602,6 +612,10 @@ static _Noreturn void kernel_main_on_guarded_stack(void* context) {
   zi_log_write(ZI_LOG_INFORMATION,
                "Session",
                "The filesystem-backed user-mode Luma acceptance session completed cleanly.");
+  status = flush_and_unmount_root_volume();
+  if (ZiFailed(status)) {
+    zi_panic("The ZiFS root volume could not be cleanly unmounted.");
+  }
   ZkArchHalt();
 }
 
@@ -682,19 +696,7 @@ static ZiStatus run_user_process_acceptance(bool force_user_fault) {
       image_source_allocate,
       image_source_release,
   };
-  ZiFsImageSourceSet libraries = {0};
-  status = zi_zifs_image_source_set_load(&g_root_volume,
-                                         k_core_library_requests,
-                                         sizeof k_core_library_requests /
-                                             sizeof k_core_library_requests[0],
-                                         &source_allocator,
-                                         g_zifs_block_buffer,
-                                         sizeof g_zifs_block_buffer,
-                                         &libraries);
-  if (ZiFailed(status)) {
-    return status;
-  }
-  const ZiSecurityId groups[] = {{ZI_SECURITY_AUTHORITY_GROUP, 1}};
+  const ZiSecurityId groups[] = {{ZI_SECURITY_AUTHORITY_GROUP, 2}};
   ZiAccessToken tokens[sizeof k_user_programmes / sizeof k_user_programmes[0]] = {0};
   for (size_t index = 0; index < sizeof tokens / sizeof tokens[0]; ++index) {
     tokens[index] = (ZiAccessToken){
@@ -708,10 +710,6 @@ static ZiStatus run_user_process_acceptance(bool force_user_fault) {
   }
   status = zi_user_process_manager_initialise(&g_user_process_manager);
   if (ZiFailed(status)) {
-    ZiStatus release_status = zi_zifs_image_source_set_release(&source_allocator, &libraries);
-    if (ZiFailed(release_status)) {
-      return ZI_STATUS_MEMORY_CORRUPTION;
-    }
     return status;
   }
 
@@ -722,10 +720,26 @@ static ZiStatus run_user_process_acceptance(bool force_user_fault) {
     process_count = 1;
   }
   for (size_t index = 0; index < process_count; ++index) {
+    const ZiFsImageSourceAccess access = {sizeof access,
+                                          ZI_FS_IMAGE_SOURCE_ACCESS_VERSION,
+                                          &g_root_volume,
+                                          &tokens[index]};
+    ZiFsImageSourceSet libraries = {0};
+    status = zi_zifs_image_source_set_load(&access,
+                                           k_core_library_requests,
+                                           sizeof k_core_library_requests /
+                                               sizeof k_core_library_requests[0],
+                                           &source_allocator,
+                                           g_zifs_block_buffer,
+                                           sizeof g_zifs_block_buffer,
+                                           &libraries);
+    if (ZiFailed(status)) {
+      break;
+    }
     const ZiUserAcceptanceProgramme* definition = &k_user_programmes[index];
     ZiFsImageSourceRequest request = {definition->module_name, definition->file_path};
     ZiFsImageSourceSet main_source = {0};
-    status = zi_zifs_image_source_set_load(&g_root_volume,
+    status = zi_zifs_image_source_set_load(&access,
                                            &request,
                                            1,
                                            &source_allocator,
@@ -754,13 +768,14 @@ static ZiStatus run_user_process_acceptance(bool force_user_fault) {
         status = ZI_STATUS_MEMORY_CORRUPTION;
       }
     }
+    ZiStatus library_release_status =
+        zi_zifs_image_source_set_release(&source_allocator, &libraries);
+    if (ZiSucceeded(status) && ZiFailed(library_release_status)) {
+      status = ZI_STATUS_MEMORY_CORRUPTION;
+    }
     if (ZiFailed(status)) {
       break;
     }
-  }
-  ZiStatus library_release_status = zi_zifs_image_source_set_release(&source_allocator, &libraries);
-  if (ZiSucceeded(status) && ZiFailed(library_release_status)) {
-    status = ZI_STATUS_MEMORY_CORRUPTION;
   }
   if (ZiSucceeded(status)) {
     zi_log_boot_marker("FILESYSTEM_PE_SOURCE");
@@ -1009,6 +1024,8 @@ static ZiStatus mount_root_block_device(const ZiBlockDevice* device) {
     zi_log_boot_marker("ZIFS_RECOVERY_ROLLBACK");
   } else if (report.action == ZI_FS_RECOVERY_ACTION_REPLAYED) {
     zi_log_boot_marker("ZIFS_RECOVERY_REPLAY");
+  } else if (report.action == ZI_FS_RECOVERY_ACTION_RECOVERED_UNCLEAN_MOUNT) {
+    zi_log_boot_marker("ZIFS_RECOVERY_UNCLEAN");
   } else {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
   }
@@ -1095,7 +1112,8 @@ static uint64_t zifs_test_fault_operation(const char* command_line) {
       command_line_has_token(command_line, "zi.test=zifs-truncate-crash-rollback") ||
       command_line_has_token(command_line, "zi.test=zifs-truncate-crash-replay") ||
       command_line_has_token(command_line, "zi.test=zifs-delete-crash-rollback") ||
-      command_line_has_token(command_line, "zi.test=zifs-delete-crash-replay")) {
+      command_line_has_token(command_line, "zi.test=zifs-delete-crash-replay") ||
+      command_line_has_token(command_line, "zi.test=zifs-unmount-crash")) {
     return UINT64_MAX;
   }
   return 0;
@@ -1141,6 +1159,33 @@ static ZiStatus failure_status_or(ZiStatus status, ZiStatus fallback) {
   return fallback;
 }
 
+static ZiStatus flush_and_unmount_root_volume(void) {
+  ZiStatus status =
+      ZiFsFlushVolume(&g_root_volume, g_zifs_block_buffer, sizeof g_zifs_block_buffer);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  zi_log_boot_marker("ZIFS_VOLUME_FLUSHED");
+  status = ZiFsUnmountVolume(&g_root_volume, g_zifs_block_buffer, sizeof g_zifs_block_buffer);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  zi_log_boot_marker("ZIFS_CLEAN_UNMOUNT");
+  return ZI_STATUS_SUCCESS;
+}
+
+static ZiStatus complete_zifs_boot_test(const char* marker) {
+  if (marker == NULL) {
+    return ZI_STATUS_INVALID_ARGUMENT;
+  }
+  zi_log_boot_marker(marker);
+  ZiStatus status = flush_and_unmount_root_volume();
+  if (ZiSucceeded(status)) {
+    ZkArchHalt();
+  }
+  return status;
+}
+
 // Dedicated QEMU modes halt after their durable marker so the harness can cut power.
 // NOLINTNEXTLINE(readability-function-size, readability-function-cognitive-complexity)
 static ZiStatus run_requested_zifs_test(const ZiBootContext* context) {
@@ -1155,35 +1200,55 @@ static ZiStatus run_requested_zifs_test(const ZiBootContext* context) {
   if (mode == ZIFS_BOOT_TEST_MODE_NONE) {
     return ZI_STATUS_SUCCESS;
   }
+  if (mode == ZIFS_BOOT_TEST_MODE_CLEAN_UNMOUNT) {
+    return complete_zifs_boot_test("ZIFS_CLEAN_UNMOUNT_REQUESTED");
+  }
+  if (mode == ZIFS_BOOT_TEST_MODE_CLEAN_UNMOUNT_VERIFY) {
+    return complete_zifs_boot_test("ZIFS_CLEAN_UNMOUNT_PERSISTED");
+  }
+  if (mode == ZIFS_BOOT_TEST_MODE_UNMOUNT_RECOVER) {
+    return complete_zifs_boot_test("ZIFS_UNCLEAN_UNMOUNT_RECOVERED");
+  }
+  if (mode == ZIFS_BOOT_TEST_MODE_UNMOUNT_CRASH) {
+    if (g_root_volume.device.context != &g_zifs_fault_context ||
+        g_zifs_fault_context.fail_operation != UINT64_MAX) {
+      return ZI_STATUS_INVALID_STATE;
+    }
+    g_zifs_fault_context.operation_count = 0;
+    g_zifs_fault_context.fail_operation = 2;
+    status = ZiFsUnmountVolume(&g_root_volume, g_zifs_block_buffer, sizeof g_zifs_block_buffer);
+    if (status != ZI_STATUS_DEVICE_ERROR || g_zifs_fault_context.operation_count != 2 ||
+        g_root_volume.is_mounted != 0 || g_root_volume.needs_recovery == 0) {
+      return ZI_STATUS_INVALID_STATE;
+    }
+    zi_log_boot_marker("ZIFS_UNMOUNT_CRASH_BOUNDARY");
+    ZkArchHalt();
+  }
   if (mode == ZIFS_BOOT_TEST_MODE_GROW_DIRECTORY) {
     status = run_zifs_grow_directory();
     if (ZiSucceeded(status)) {
-      zi_log_boot_marker("ZIFS_GROWTH_COMMIT");
-      ZkArchHalt();
+      status = complete_zifs_boot_test("ZIFS_GROWTH_COMMIT");
     }
     return status;
   }
   if (mode == ZIFS_BOOT_TEST_MODE_GROW_DIRECTORY_VERIFY) {
     status = verify_zifs_grow_directory();
     if (ZiSucceeded(status)) {
-      zi_log_boot_marker("ZIFS_GROWTH_DIRECTORY_PERSISTED");
-      ZkArchHalt();
+      status = complete_zifs_boot_test("ZIFS_GROWTH_DIRECTORY_PERSISTED");
     }
     return status;
   }
   if (mode == ZIFS_BOOT_TEST_MODE_TRUNCATE_DELETE) {
     status = run_zifs_truncate_delete();
     if (ZiSucceeded(status)) {
-      zi_log_boot_marker("ZIFS_RECLAIM_AFTER_CHECKPOINT");
-      ZkArchHalt();
+      status = complete_zifs_boot_test("ZIFS_RECLAIM_AFTER_CHECKPOINT");
     }
     return status;
   }
   if (mode == ZIFS_BOOT_TEST_MODE_TRUNCATE_DELETE_VERIFY) {
     status = verify_zifs_truncate_delete();
     if (ZiSucceeded(status)) {
-      zi_log_boot_marker("ZIFS_TRUNCATE_DELETE_PERSISTED");
-      ZkArchHalt();
+      status = complete_zifs_boot_test("ZIFS_TRUNCATE_DELETE_PERSISTED");
     }
     return status;
   }
@@ -1203,12 +1268,11 @@ static ZiStatus run_requested_zifs_test(const ZiBootContext* context) {
     bool expected_complete = mode == ZIFS_BOOT_TEST_MODE_TRUNCATE_VERIFY_NEW;
     status = verify_zifs_crash_truncate(expected_complete);
     if (ZiSucceeded(status)) {
+      const char* marker = "ZIFS_TRUNCATE_OLD_STATE";
       if (expected_complete) {
-        zi_log_boot_marker("ZIFS_TRUNCATE_NEW_STATE");
-      } else {
-        zi_log_boot_marker("ZIFS_TRUNCATE_OLD_STATE");
+        marker = "ZIFS_TRUNCATE_NEW_STATE";
       }
-      ZkArchHalt();
+      status = complete_zifs_boot_test(marker);
     }
     return status;
   }
@@ -1228,28 +1292,25 @@ static ZiStatus run_requested_zifs_test(const ZiBootContext* context) {
     bool expected_complete = mode == ZIFS_BOOT_TEST_MODE_DELETE_VERIFY_NEW;
     status = verify_zifs_crash_delete(expected_complete);
     if (ZiSucceeded(status)) {
+      const char* marker = "ZIFS_DELETE_OLD_STATE";
       if (expected_complete) {
-        zi_log_boot_marker("ZIFS_DELETE_NEW_STATE");
-      } else {
-        zi_log_boot_marker("ZIFS_DELETE_OLD_STATE");
+        marker = "ZIFS_DELETE_NEW_STATE";
       }
-      ZkArchHalt();
+      status = complete_zifs_boot_test(marker);
     }
     return status;
   }
   if (mode == ZIFS_BOOT_TEST_MODE_RENAME_MOVE) {
     status = run_zifs_rename_move();
     if (ZiSucceeded(status)) {
-      zi_log_boot_marker("ZIFS_RENAME_MOVE_COMMIT");
-      ZkArchHalt();
+      status = complete_zifs_boot_test("ZIFS_RENAME_MOVE_COMMIT");
     }
     return status;
   }
   if (mode == ZIFS_BOOT_TEST_MODE_RENAME_MOVE_VERIFY) {
     status = verify_zifs_rename_move(true);
     if (ZiSucceeded(status)) {
-      zi_log_boot_marker("ZIFS_RENAME_MOVE_PERSISTED");
-      ZkArchHalt();
+      status = complete_zifs_boot_test("ZIFS_RENAME_MOVE_PERSISTED");
     }
     return status;
   }
@@ -1268,28 +1329,25 @@ static ZiStatus run_requested_zifs_test(const ZiBootContext* context) {
     bool expected_complete = mode == ZIFS_BOOT_TEST_MODE_MOVE_VERIFY_NEW;
     status = verify_zifs_crash_move(expected_complete);
     if (ZiSucceeded(status)) {
+      const char* marker = "ZIFS_MOVE_OLD_STATE";
       if (expected_complete) {
-        zi_log_boot_marker("ZIFS_MOVE_PERSISTED");
-      } else {
-        zi_log_boot_marker("ZIFS_MOVE_OLD_STATE");
+        marker = "ZIFS_MOVE_PERSISTED";
       }
-      ZkArchHalt();
+      status = complete_zifs_boot_test(marker);
     }
     return status;
   }
   if (mode == ZIFS_BOOT_TEST_MODE_WRAP_CREATE) {
     status = run_zifs_wrap_create();
     if (ZiSucceeded(status)) {
-      zi_log_boot_marker("ZIFS_JOURNAL_WRAPPED");
-      ZkArchHalt();
+      status = complete_zifs_boot_test("ZIFS_JOURNAL_WRAPPED");
     }
     return status;
   }
   if (mode == ZIFS_BOOT_TEST_MODE_WRAP_VERIFY) {
     status = run_zifs_wrap_verify();
     if (ZiSucceeded(status)) {
-      zi_log_boot_marker("ZIFS_WRAP_PERSISTED");
-      ZkArchHalt();
+      status = complete_zifs_boot_test("ZIFS_WRAP_PERSISTED");
     }
     return status;
   }
@@ -1307,11 +1365,9 @@ static ZiStatus run_requested_zifs_test(const ZiBootContext* context) {
       return status;
     }
     if (expected_present) {
-      zi_log_boot_marker("ZIFS_WRITE_PERSISTED");
-    } else {
-      zi_log_boot_marker("ZIFS_WRITE_ABSENT");
+      return complete_zifs_boot_test("ZIFS_WRITE_PERSISTED");
     }
-    ZkArchHalt();
+    return complete_zifs_boot_test("ZIFS_WRITE_ABSENT");
   }
 
   status = verify_zifs_test_file(false);
@@ -1391,8 +1447,7 @@ static ZiStatus run_requested_zifs_test(const ZiBootContext* context) {
   if (ZiFailed(status)) {
     return status;
   }
-  zi_log_boot_marker("ZIFS_WRITE_COMMIT");
-  ZkArchHalt();
+  return complete_zifs_boot_test("ZIFS_WRITE_COMMIT");
 }
 
 static ZiStatus verify_zifs_test_file(bool expected_present) {

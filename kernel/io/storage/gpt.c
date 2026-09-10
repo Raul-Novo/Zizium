@@ -14,7 +14,6 @@
 #define GPT_HEADER_MINIMUM_SIZE 92u
 #define GPT_HEADER_MAXIMUM_SIZE 4096u
 #define GPT_SIGNATURE_SIZE 8u
-#define GPT_PROTECTIVE_MBR_SIZE 512u
 
 typedef struct ZiGptHeaderData {
   ZiGuid disk_guid;

@@ -224,6 +224,12 @@ The `MEMORY_STRESS` marker is emitted only after every operation succeeds and
 the final counts match. `make fault-test` separately verifies invalid opcode,
 an ordinary unmapped access, and a real write to an active lower guard page.
 
+The diagnostic migration preserves native allocator layout. Compile-time
+assertions tie block/slot alignment to the pool guarantee; scans validate
+aligned spans before constructing typed views of allocator-owned storage.
+Object-cache validation explicitly rejects a misaligned backing pointer,
+including an adversarial host fixture. No alignment warning is disabled.
+
 ## Scaffolded
 
 - The address-space record has a bounded region table, deterministic free-range

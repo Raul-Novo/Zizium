@@ -9,8 +9,10 @@
 #include "zi/byte_order.h"
 #include "zi/path.h"
 #include "zi/pe.h"
+#include "zi/security.h"
 #include "zi/unicode.h"
 #include "zi/zifs.h"
+#include "zi/zifs_security.h"
 #include "zizium/status.h"
 #include "zizium/types.h"
 
@@ -18,22 +20,24 @@ static bool allocator_is_valid(const ZiFsImageSourceAllocator* allocator);
 static bool module_name_is_valid(ZiStringView module_name);
 static bool string_views_equal(ZiStringView left, ZiStringView right);
 static ZiStatus validate_requests(const ZiFsImageSourceRequest* requests, size_t request_count);
-static ZiStatus load_one_source(const ZiFsVolume* volume,
+static ZiStatus load_one_source(const ZiFsImageSourceAccess* access,
                                 const ZiFsImageSourceRequest* request,
                                 const ZiFsImageSourceAllocator* allocator,
                                 void* block_buffer,
                                 size_t block_buffer_size,
                                 ZiFsImageSourceSet* source_set);
 
-ZiStatus zi_zifs_image_source_set_load(const ZiFsVolume* volume,
+ZiStatus zi_zifs_image_source_set_load(const ZiFsImageSourceAccess* access,
                                        const ZiFsImageSourceRequest* requests,
                                        size_t request_count,
                                        const ZiFsImageSourceAllocator* allocator,
                                        void* block_buffer,
                                        size_t block_buffer_size,
                                        ZiFsImageSourceSet* out_source_set) {
-  if (volume == NULL || !allocator_is_valid(allocator) || block_buffer == NULL ||
-      block_buffer_size < ZI_FS_BLOCK_SIZE || out_source_set == NULL) {
+  if (access == NULL || access->struct_size != sizeof *access ||
+      access->version != ZI_FS_IMAGE_SOURCE_ACCESS_VERSION || access->volume == NULL ||
+      ZiFailed(zi_security_token_validate(access->token)) || !allocator_is_valid(allocator) ||
+      block_buffer == NULL || block_buffer_size < ZI_FS_BLOCK_SIZE || out_source_set == NULL) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }
   ZiStatus status = validate_requests(requests, request_count);
@@ -45,7 +49,7 @@ ZiStatus zi_zifs_image_source_set_load(const ZiFsVolume* volume,
   source_set.struct_size = sizeof source_set;
   source_set.version = ZI_FS_IMAGE_SOURCE_SET_VERSION;
   for (size_t index = 0; index < request_count; ++index) {
-    status = load_one_source(volume,
+    status = load_one_source(access,
                              &requests[index],
                              allocator,
                              block_buffer,
@@ -134,7 +138,7 @@ static ZiStatus validate_requests(const ZiFsImageSourceRequest* requests, size_t
   return ZI_STATUS_SUCCESS;
 }
 
-static ZiStatus load_one_source(const ZiFsVolume* volume,
+static ZiStatus load_one_source(const ZiFsImageSourceAccess* access,
                                 const ZiFsImageSourceRequest* request,
                                 const ZiFsImageSourceAllocator* allocator,
                                 void* block_buffer,
@@ -149,7 +153,13 @@ static ZiStatus load_one_source(const ZiFsVolume* volume,
                                            &path);
   ZiFsFileRecord record = {0};
   if (ZiSucceeded(status)) {
-    status = ZiFsLookupPath(volume, &path, block_buffer, block_buffer_size, &record);
+    status = ZiFsLookupPathAuthorised(access->volume,
+                                      &path,
+                                      access->token,
+                                      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE,
+                                      block_buffer,
+                                      block_buffer_size,
+                                      &record);
   }
   if (ZiFailed(status)) {
     return status;
@@ -173,7 +183,7 @@ static ZiStatus load_one_source(const ZiFsVolume* volume,
   }
 
   size_t bytes_read = 0;
-  status = ZiFsReadFile(volume,
+  status = ZiFsReadFile(access->volume,
                         &record,
                         0,
                         allocation,

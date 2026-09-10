@@ -13,9 +13,11 @@
 #include "zi/log.h"
 #include "zi/object.h"
 #include "zi/path.h"
+#include "zi/pool.h"
 #include "zi/process_parameters.h"
 #include "zi/security.h"
 #include "zi/service.h"
+#include "zi/service_identity.h"
 #include "zi/user_image.h"
 #include "zi/user_process.h"
 #include "zi/zifs.h"
@@ -80,6 +82,7 @@ static ZiStatus supervise_core_services(ZiSystemBootstrap* bootstrap,
                                         size_t* out_session_index);
 static ZiStatus verify_service_failure_policy(ZiSystemBootstrap* bootstrap,
                                               const ZiServiceManifest* manifest);
+static ZiStatus verify_image_launch_policy(ZiSystemBootstrap* bootstrap, ZiStringView image_path);
 static ZiStatus run_user_session(ZiSystemBootstrap* bootstrap,
                                  const ZiServiceManifest* session_manifest);
 static ZiStatus initialise_session_channels(ZiSystemBootstrap* bootstrap,
@@ -95,9 +98,6 @@ static ZiStatus release_session_resources(ZiSystemBootstrap* bootstrap,
                                           ZiUserProcess* luma,
                                           ZiChannel* session_channel,
                                           ZiChannel* luma_channel);
-static ZiAccessToken make_service_token(const ZiServiceManifest* manifest,
-                                        ZiSecurityId* group_storage);
-static uint32_t service_identity_value(ZiStringView name);
 static const char* service_marker(ZiStringView name);
 static bool view_equals(ZiStringView view, const char* text, size_t text_size);
 
@@ -235,9 +235,13 @@ static ZiStatus create_zifs_process(ZiSystemBootstrap* bootstrap,
     return ZI_STATUS_INVALID_PATH;
   }
   ZiStringView module_name = parsed.components[parsed.component_count - 1u];
+  const ZiFsImageSourceAccess access = {sizeof access,
+                                        ZI_FS_IMAGE_SOURCE_ACCESS_VERSION,
+                                        bootstrap->root_volume,
+                                        token};
 
   ZiFsImageSourceSet libraries = {0};
-  status = zi_zifs_image_source_set_load(bootstrap->root_volume,
+  status = zi_zifs_image_source_set_load(&access,
                                          k_core_library_requests,
                                          sizeof k_core_library_requests /
                                              sizeof k_core_library_requests[0],
@@ -251,7 +255,7 @@ static ZiStatus create_zifs_process(ZiSystemBootstrap* bootstrap,
 
   ZiFsImageSourceRequest request = {module_name, image_path};
   ZiFsImageSourceSet main_source = {0};
-  status = zi_zifs_image_source_set_load(bootstrap->root_volume,
+  status = zi_zifs_image_source_set_load(&access,
                                          &request,
                                          1,
                                          &bootstrap->image_allocator,
@@ -306,7 +310,11 @@ static ZiStatus service_launch(void* context,
     return ZI_STATUS_INVALID_ARGUMENT;
   }
   ZiSecurityId group = {0};
-  ZiAccessToken token = make_service_token(manifest, &group);
+  ZiAccessToken token = {0};
+  ZiStatus status = zi_service_bootstrap_token_create(manifest, &group, &token);
+  if (ZiFailed(status)) {
+    return status;
+  }
   ZiStringView arguments[2] = {manifest->executable_path, {0}};
   size_t argument_count = 1;
   if (launch_context->failure_probe) {
@@ -324,12 +332,12 @@ static ZiStatus service_launch(void* context,
       sizeof k_system_environment / sizeof k_system_environment[0],
   };
   ZiUserProcess* process = NULL;
-  ZiStatus status = create_zifs_process(launch_context->bootstrap,
-                                        NULL,
-                                        manifest->executable_path,
-                                        &parameters,
-                                        &token,
-                                        &process);
+  status = create_zifs_process(launch_context->bootstrap,
+                               NULL,
+                               manifest->executable_path,
+                               &parameters,
+                               &token,
+                               &process);
   if (ZiSucceeded(status)) {
     status = zi_user_process_run(launch_context->bootstrap->process_manager, process, false);
   }
@@ -402,9 +410,21 @@ static ZiStatus supervise_core_services(ZiSystemBootstrap* bootstrap,
 static ZiStatus verify_service_failure_policy(ZiSystemBootstrap* bootstrap,
                                               const ZiServiceManifest* manifest) {
   ZiServiceManifest probe = *manifest;
+  ZiServiceLaunchContext context = {bootstrap, true};
+  // Even a syntactically valid SYSTEM declaration cannot authorise an unknown service.
+  probe.name = (ZiStringView){"UnprovisionedHost", sizeof "UnprovisionedHost" - 1u};
+  int32_t denied_exit_code = 0;
+  if (service_launch(&context, &probe, 1, &denied_exit_code) != ZI_STATUS_ACCESS_DENIED) {
+    return ZI_STATUS_INVALID_STATE;
+  }
+  zi_log_boot_marker("SERVICE_POLICY_DENIED");
+  ZiStatus access_status = verify_image_launch_policy(bootstrap, manifest->executable_path);
+  if (ZiFailed(access_status)) {
+    return access_status;
+  }
+  probe = *manifest;
   probe.restart_policy = ZI_SERVICE_RESTART_ON_FAILURE;
   probe.maximum_restarts = 2;
-  ZiServiceLaunchContext context = {bootstrap, true};
   ZiServiceSupervisionResult result = {0};
   ZiStatus status = zi_service_supervise(&probe, service_launch, &context, &result);
   if (status != ZI_STATUS_SERVICE_RESTART_LIMIT || result.attempt_count != 3 ||
@@ -417,11 +437,50 @@ static ZiStatus verify_service_failure_policy(ZiSystemBootstrap* bootstrap,
   return ZI_STATUS_SUCCESS;
 }
 
+static ZiStatus verify_image_launch_policy(ZiSystemBootstrap* bootstrap, ZiStringView image_path) {
+  const ZiAccessToken token =
+      {sizeof token, ZI_ACCESS_TOKEN_VERSION, {ZI_SECURITY_AUTHORITY_USER, UINT32_MAX}, NULL, 0, 0};
+  const ZiProcessParameterInput parameters = {sizeof parameters,
+                                              ZI_PROCESS_PARAMETER_INPUT_VERSION,
+                                              image_path,
+                                              image_path,
+                                              &image_path,
+                                              1,
+                                              NULL,
+                                              0};
+  ZiPoolStatistics before = {0};
+  ZiStatus status = zi_kernel_pool_statistics(&before);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  ZiUserProcess* process = NULL;
+  status = create_zifs_process(bootstrap, NULL, image_path, &parameters, &token, &process);
+  if (status != ZI_STATUS_ACCESS_DENIED || process != NULL) {
+    return ZI_STATUS_INVALID_STATE;
+  }
+  ZiPoolStatistics after = {0};
+  status = zi_kernel_pool_statistics(&after);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  if (before.allocation_count != after.allocation_count ||
+      before.allocated_bytes != after.allocated_bytes) {
+    return ZI_STATUS_MEMORY_CORRUPTION;
+  }
+  zi_log_boot_marker("IMAGE_ACCESS_DENIED");
+  return ZI_STATUS_SUCCESS;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity, readability-function-size) -- cleanup is ownership-ordered.
 static ZiStatus run_user_session(ZiSystemBootstrap* bootstrap,
                                  const ZiServiceManifest* session_manifest) {
   ZiSecurityId session_group = {0};
-  ZiAccessToken session_token = make_service_token(session_manifest, &session_group);
+  ZiAccessToken session_token = {0};
+  ZiStatus status =
+      zi_service_bootstrap_token_create(session_manifest, &session_group, &session_token);
+  if (ZiFailed(status)) {
+    return status;
+  }
   ZiStringView session_arguments[] = {session_manifest->executable_path};
   ZiProcessParameterInput session_parameters = {
       sizeof(ZiProcessParameterInput),
@@ -433,7 +492,7 @@ static ZiStatus run_user_session(ZiSystemBootstrap* bootstrap,
       k_system_environment,
       sizeof k_system_environment / sizeof k_system_environment[0],
   };
-  ZiSecurityId luma_group = {ZI_SECURITY_AUTHORITY_GROUP, 1};
+  ZiSecurityId luma_group = {ZI_SECURITY_AUTHORITY_GROUP, 2};
   ZiAccessToken luma_token = {
       sizeof(ZiAccessToken),
       ZI_ACCESS_TOKEN_VERSION,
@@ -463,12 +522,12 @@ static ZiStatus run_user_session(ZiSystemBootstrap* bootstrap,
   ZiAce channel_entries[2] = {0};
   ZiAcl channel_acl = {0};
   ZiSecurityDescriptor channel_descriptor = {0};
-  ZiStatus status = create_zifs_process(bootstrap,
-                                        NULL,
-                                        session_manifest->executable_path,
-                                        &session_parameters,
-                                        &session_token,
-                                        &session);
+  status = create_zifs_process(bootstrap,
+                               NULL,
+                               session_manifest->executable_path,
+                               &session_parameters,
+                               &session_token,
+                               &session);
   if (ZiSucceeded(status)) {
     status =
         create_zifs_process(bootstrap, NULL, k_luma_path, &luma_parameters, &luma_token, &luma);
@@ -648,34 +707,6 @@ static ZiStatus release_session_resources(ZiSystemBootstrap* bootstrap,
     }
   }
   return result;
-}
-
-static ZiAccessToken make_service_token(const ZiServiceManifest* manifest,
-                                        ZiSecurityId* group_storage) {
-  *group_storage = (ZiSecurityId){ZI_SECURITY_AUTHORITY_GROUP, 1};
-  ZiSecurityId user = {ZI_SECURITY_AUTHORITY_SERVICE, service_identity_value(manifest->name)};
-  if (manifest->token_policy == ZI_SERVICE_TOKEN_SYSTEM) {
-    user = (ZiSecurityId){ZI_SECURITY_AUTHORITY_SYSTEM, 1};
-  } else if (manifest->token_policy == ZI_SERVICE_TOKEN_SESSION_BOOTSTRAP) {
-    user = (ZiSecurityId){ZI_SECURITY_AUTHORITY_SYSTEM, 2};
-  }
-  return (ZiAccessToken){
-      sizeof(ZiAccessToken),
-      ZI_ACCESS_TOKEN_VERSION,
-      user,
-      group_storage,
-      1,
-      0,
-  };
-}
-
-static uint32_t service_identity_value(ZiStringView name) {
-  uint32_t value = UINT32_C(2166136261);
-  for (size_t index = 0; index < name.size; ++index) {
-    value ^= (unsigned char)name.data[index];
-    value *= UINT32_C(16777619);
-  }
-  return value == 0 ? 1 : value;
 }
 
 static const char* service_marker(ZiStringView name) {

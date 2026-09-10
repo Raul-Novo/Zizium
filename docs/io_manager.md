@@ -37,6 +37,18 @@ Released allocation bits exist only in journalled home-block images; the
 current single-writer/recovery gate prevents a new allocator from observing
 those blocks until checkpoint publication.
 
+Writable ZiFS activation and clean unmount also use this contract directly.
+Activation publishes the mounted marker backup-first with a flush after each
+copy. Explicit filesystem flush validates a checkpointed empty journal before
+issuing a block barrier; unmount then clears the marker backup-first with the
+same ordering. Any failed write or barrier freezes the volume fail-closed.
+
+The host-only repair adapter opens a raw or GPT container exclusively for an
+approved apply operation and exposes the selected volume as the same bounded
+read/write/flush `ZiBlockDevice` contract. It writes one planned block followed
+by one flush and closes without reporting success if any barrier fails. This
+does not create a public kernel file or volume-control path.
+
 ## Scaffolded
 
 Create, close, device-control, PnP, and power operations are reserved. Block

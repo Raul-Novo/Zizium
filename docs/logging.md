@@ -77,6 +77,20 @@ been exercised. The negative security-table boot requires
 `ZIFS_SECURITY_CORRUPTION_SAFE` before `STORAGE_MODULE_FALLBACK` and forbids
 `ZIFS_DIRECT`, proving corrupted policy was rejected before root-volume use.
 
+The volume-lifecycle extension emits `ZIFS_VOLUME_FLUSHED` only after the
+block-device barrier succeeds and `ZIFS_CLEAN_UNMOUNT` only after both
+superblock copies record the clean, unmounted state. A later boot distinguishes
+an interrupted but transaction-free mount with `ZIFS_RECOVERY_UNCLEAN` before
+performing a normal clean unmount. Deliberate crash-boundary boots forbid the
+flush and clean-unmount markers, preventing an incomplete close from appearing
+durable.
+
+The offline-repair acceptance case is host-controlled and does not invent a
+kernel recovery event. After the reviewed three-action repair reaches a clean
+fixed point, the next boot must emit ordinary direct-mount and clean-unmount
+evidence while forbidding rollback, replay, redundancy-repair, and unclean-
+mount recovery markers.
+
 ## Scaffolded
 
 LogHost and per-service log paths reserve routing. `Show-Log` exposes the early

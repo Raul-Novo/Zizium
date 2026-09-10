@@ -55,7 +55,7 @@ ZiStatus zi_storage_bootstrap_initialise(const ZiBootContext* boot_context,
   if (boot_context == NULL || boot_context->struct_size < sizeof *boot_context ||
       boot_context->version != ZI_BOOT_CONTEXT_VERSION ||
       boot_context->rsdp_physical_address == 0 || bootstrap == NULL || out_zifs_partition == NULL ||
-      (flags & ~ZI_STORAGE_INITIALISE_FORCE_NVME_TIMEOUT) != 0) {
+      (flags & ~(uint32_t)ZI_STORAGE_INITIALISE_FORCE_NVME_TIMEOUT) != 0) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }
   *out_zifs_partition = NULL;

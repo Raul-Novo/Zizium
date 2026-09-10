@@ -23,3 +23,6 @@ descriptor links, and future package metadata reserve places for capabilities.
 Capability identities, consent UI, resource brokers, private storage, network
 isolation, revocation, background quotas, policy updates, package-signature
 binding, and auditing require a complete user/process security boundary.
+Phase 8 will first make durable identities, logon-derived tokens, privileges,
+and auditing real; capability enforcement must layer on that boundary rather
+than bypassing it.

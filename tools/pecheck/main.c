@@ -204,8 +204,8 @@ static const char* kind_name(enum PeCheckKind kind) {
     case PE_CHECK_KIND_ANY:
       return "unspecified";
     case PE_CHECK_KIND_INVALID:
+    default:
       return "invalid";
   }
-  return "invalid";
 }
 // NOLINTEND(cert-err33-c, clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)

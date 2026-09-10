@@ -80,9 +80,9 @@ runs and waits for exit status 21 through the nested Ring-3 boundary, closes
 the process handle, and proves stale-handle rejection. Normal boot requires
 complete process/channel cleanup through `USER_SESSION`.
 
-The current Phase 7 writable slice is implemented without marking the phase
-complete. Version-three block devices and IRPs carry bounded writes and flush
-barriers through the partition adapter and polling QEMU NVMe driver. ZiFS has
+Phase 7 is complete. Version-three block devices and IRPs carry bounded writes
+and flush barriers through the partition adapter and polling QEMU NVMe driver.
+ZiFS has
 scalable allocation maps, redundant version-one journal headers, full-block
 redo records, dirty/clean superblock generations, staged creation of one
 bounded regular file, exact-case no-replacement same-directory rename and
@@ -121,6 +121,16 @@ extend the final physical extent, and may add another inline extent when that
 range is occupied. Offsets beyond end-of-file, sparse allocation, a fifth
 extent, and directory deletion remain unsupported.
 
+Incompatible feature `ZI_FS_FEATURE_INCOMPAT_CLEAN_UNMOUNT_V1` now freezes the
+volume lifecycle. A successful writable mount validates recovery, root, and
+security metadata before publishing `MOUNTED` backup-first with flushes. The
+explicit flush requires an empty checkpointed journal and issues a device
+barrier. Clean unmount flushes, clears backup and primary state with barriers,
+and closes the volume; read-only mounts never write. Any partial activation,
+flush, or unmount freezes the volume fail-closed. A restart that sees a stable
+mounted marker reports a distinct unclean-shutdown recovery action before the
+next writable activation.
+
 Host tests fail every one of the 29 write/flush operations in the original
 commit, all 23 in a wrapped transaction, all 23 in rename, all 25 in move, and
 all 25 in each truncate/delete transaction, requiring an exact old-or-new
@@ -129,26 +139,44 @@ namespace, file-data, and allocation state after every restart. A successful
 campaigns fail every write-growth operation and every operation in the first
 directory expansion, requiring exactly the old or new size/content, path,
 extent, allocation, and generation state after recovery. Host acceptance is
-now 33 groups and 2,923 assertions. `make zifs-test` proves clean create,
+now 36 groups and 3,079 assertions. `make zifs-test` proves clean unmount and
+reboot, interrupted-unmount diagnosis and recovery, clean create,
 write growth, multi-block directory persistence, rename/move, truncate/delete,
 both crash outcomes, slot-31-to-slot-0 wrap, post-wrap persistence, and
-checkpoint-delayed reuse across twenty-seven real QEMU/EDK2 boots of writable
+checkpoint-delayed reuse across thirty-two real QEMU/EDK2 boots of writable
 NVMe image copies. The final boot corrupts a durable ACE on the direct
 partition, proves fail-closed rejection with `ZIFS_SECURITY_CORRUPTION_SAFE`,
 and uses only the explicit clean recovery module. The version-one `ZISD`
 region stores checksummed owner/group/DACL/ACE data, mount validates every live
 reference, and normal boot exercises allow, deny, and default-deny policy.
-Phase 7 remains active because clean-unmount/flush semantics, bounded repair
-policy/tooling, and its complete exit criteria are not yet finished.
 
 The Windows-host `zifsinspect.exe` is now a real, strictly read-only inspector
 for raw volumes and frozen-GUID GPT images. It validates both superblocks and
 journal headers, committed in-flight journal state, security records, all live
 file and directory relationships, extents/cross-links, and allocation maps.
 Committed pre-checkpoint state is evaluated through a heap-owned replay overlay;
-the image is never repaired or recovered in place. Eleven fixtures (including
-a valid formatter-created multi-block directory) and three real QEMU
-checkpoints compare SHA-256 before and after inspection.
+the image is never repaired or recovered in place. Thirteen fixtures (including
+an unclean-mount lifecycle image and a valid formatter-created multi-block
+directory) and five real QEMU checkpoints compare SHA-256 before and after
+inspection.
+
+The separate Windows-host `zifsrepair.exe` implements a bounded offline
+plan/apply policy for raw volumes and frozen-GUID GPT images. It repairs only a
+uniquely provable superblock copy, journal-header copy, transaction-free
+interrupted mount, or safe combination. Planning is read-only; apply obtains
+exclusive access, recalculates a SHA-256 review token, verifies exact old
+bytes, writes each block with a barrier, and requires a clean full-volume
+inspection. Active transactions, ambiguous redundancy, security or namespace
+damage, extent errors, and allocation leaks are refused. Host fault injection
+covers every write/barrier prefix, command-line tests cover stale tokens and
+UTF-16 paths, and the thirty-second QEMU case repairs a persistent GPT image
+offline before a direct boot with no kernel recovery marker.
+
+The Phase 7 audit confirms that create/write/read/rename/delete persist on the
+real ZiFS NVMe partition; forced commit-boundary failures expose deterministic
+old-or-new state; checksum and security corruption are detected under the
+documented fail-closed policy; security descriptors survive reboot; and no
+alternative root filesystem has been introduced. Phase 8 is now active.
 
 The authoritative command results, image hashes, limitations, and exact file
 lists are in `ZIZIUM_PROGRESS.md`. Detailed contracts are in `memory.md`,
@@ -172,25 +200,55 @@ lists are in `ZIZIUM_PROGRESS.md`. Detailed contracts are in `memory.md`,
   markers must stay live while services and user-mode shell support grow. Both
   negative storage gates remain mandatory. Phase 6 filesystem PE, service
   supervision, user Luma, nested child, and session-cleanup markers must also
-  remain live.
+  remain live. Phase 7 durable-mutation, recovery, lifecycle, inspection,
+  repair, and security-corruption evidence must remain live.
 
 ## Exact next task
 
-Extend Phase 7 from its verified durable transaction and security-descriptor
-foundation in this dependency order:
+The strict compiler, analysis, AddressSanitizer and boot/durability regression
+gates for the first Phase 8 prerequisite corrections passed on 2026-09-08:
+36 host groups, 3,079 assertions, all 32 ZiFS boots, matching 21 release
+artefacts across two builds, and optional Intel validation. Use the latest
+progress report for commands and limitations. The build/test wrappers load
+the installed x64 Visual Studio environment automatically when required.
 
-1. Define and verify clean-unmount/flush semantics before broadening writer
-   concurrency or repair policy.
-2. Specify a bounded repair policy which consumes inspector evidence without
-   converting unknown corruption into apparent success.
-3. Finish the remaining Phase 7 exit-criteria audit, including directory
-   deletion/reclamation only if the documented milestone requires it.
+The subsequent launch prerequisite now removes bootstrap Administrators grants,
+resolves approved service policies to explicit reserved identities, and enforces
+Execute traversal plus Read/Execute on each EXE/DLL under its own launch token.
+SessionHost declares NID:SERVICE:SessionHost and uses SERVICE:3; LogHost/MountHost
+reserve SERVICE:1/2. SYSTEM is reserved for the two approved hand-off programmes.
+Never treat these bootstrap pairs as authenticated local users or migrate old
+hash IDs implicitly. Rebuild old SessionBootstrap manifests/images.
 
-Do not mark Phase 7 complete until create/write/read/rename/delete and security
-descriptors persist across reboot and all exit criteria pass. Do not introduce
-another root filesystem or bypass ZiFS security-record references.
+The new host regressions cover the verified old-hash collision, policy substitution,
+directory/image access distinctions, missing tokens, policy corruption and source
+rollback. Boot requires SERVICE_POLICY_DENIED and IMAGE_ACCESS_DENIED alongside
+all old markers. Consult the latest progress report for completed gate evidence.
+The completed launch-boundary gates on 2026-09-08 report 38 host groups and
+3,285 assertions, analysis, AddressSanitizer, all fault/storage and 32 serial
+ZiFS boots, optional Intel validation and 21 matching release artefacts.
+Token storage and volume state must stay stable during the synchronous lookup/read;
+concurrent file/security changes still need a locking/revocation contract.
+
+Credentials, durable identities and ACL propagation remain unimplemented.
+Continue in this dependency order:
+
+1. Refine the existing `identity_security.md` threat model alongside concrete
+   credentials, database updates, token construction, inheritance, and audit APIs.
+2. Freeze a bounded, versioned NID and identity-database format with checksum,
+   transaction, rollback, and recovery rules on ZiFS.
+3. Select a maintained, reviewed memory-hard password-hashing implementation
+   compatible with the project's licence and freestanding/user-mode boundary;
+   do not invent cryptography.
+4. Implement two local users and groups, logon-derived tokens, persistent
+   ownership/default ACL inheritance, and adversarial isolation tests before
+   adding elevation.
+
+Preserve default deny, exact-case identities and paths, no implicit SYSTEM or
+administrator bypass, and all Phase 7 durability and corruption gates.
 
 ## Later sequence
 
-After Phase 7: implement the Phase 8 durable identity, ACL inheritance, logon,
-and elevation boundary before expanding user-facing administration.
+After the first Phase 8 identity/database slice: implement logon, ACL
+inheritance, auditable privilege use, restricted service identities, and
+explicit elevation before expanding user-facing administration.

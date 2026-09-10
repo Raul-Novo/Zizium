@@ -22,6 +22,7 @@
 #define ZI_SECURITY_DESCRIPTOR_VERSION 1u
 #define ZI_ACCESS_TOKEN_VERSION 1u
 #define ZI_SECURITY_MAXIMUM_ACES 64u
+#define ZI_SECURITY_MAXIMUM_TOKEN_GROUPS 16u
 
 #define ZI_ACE_INHERIT_FILE (UINT8_C(1) << 0)
 #define ZI_ACE_INHERIT_DIRECTORY (UINT8_C(1) << 1)
@@ -81,6 +82,10 @@ typedef struct ZiAccessToken {
   size_t group_count;
   uint64_t privileges;
 } ZiAccessToken;
+
+// Token principals are SYSTEM, USER, or SERVICE; memberships are GROUP only.
+// The caller owns readable, stable storage for the token and its bounded groups.
+// Validation rejects an oversized count before reading any group element.
 
 bool zi_security_id_equal(ZiSecurityId left, ZiSecurityId right);
 ZiStatus zi_security_id_validate(ZiSecurityId id);

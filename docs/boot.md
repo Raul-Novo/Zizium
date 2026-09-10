@@ -26,6 +26,7 @@ calibrated local-APIC timer and pre-emption proof
 filesystem-backed core-service supervision and failure-policy proof
 SessionHost-to-Luma channel bootstrap
 user-mode Luma child launch, wait, close, and session teardown
+ZiFS durable flush and clean unmount
 ```
 
 `boot/limine/adapter.c` uses Limine base revision 6 and requests bootloader
@@ -49,7 +50,10 @@ one namespace, validates both GPT headers and entry arrays, and selects the
 frozen ZiFS partition type. A partition `ZiBlockDevice` then supplies bounded
 reads, writes, and flush barriers to the real ZiFS mount. Mount compares both
 superblocks and both journal headers; a recoverable dirty or redundant state is
-rolled back, replayed, or repaired before normal use.
+rolled back, replayed, or repaired before normal use. A clean writable mount is
+then activated by publishing the mounted state backup-first with barriers. The
+normal successful path explicitly flushes, publishes the cleanly-unmounted
+state backup-first, and only then halts.
 
 The module named `zizium-root.zifs` remains a genuine ZiFS volume, never a RAM
 filesystem. It is accepted only for the explicit `zi.storage=module`
@@ -72,8 +76,9 @@ restarts. SessionHost and Luma then receive separate tokens and endpoints of an
 ACL-protected channel. SessionHost queues a ready record and quoted command;
 Luma rejects the wrong-case target, launches the exact standard-C PE beneath
 `C:\Program Files`, waits for status 21, and closes it. Normal boot halts after
-all process and channel ownership is reclaimed. The kernel-integrated shell is
-entered only for explicit recovery options.
+all process and channel ownership is reclaimed and ZiFS has emitted
+`ZIFS_VOLUME_FLUSHED` followed by `ZIFS_CLEAN_UNMOUNT`. The kernel-integrated
+shell is entered only for explicit recovery options.
 
 The normal smoke test requires `ENTRY`, `SERIAL`, `CPU_TABLES`,
 `EXCEPTION_READY`, `BOOT_CONTEXT`, `MEMORY_INVENTORY`, `PMM_READY`,
@@ -81,7 +86,7 @@ The normal smoke test requires `ENTRY`, `SERIAL`, `CPU_TABLES`,
 `MEMORY_STRESS`, `FRAMEBUFFER` or `FRAMEBUFFER_FALLBACK`, `IO_MANAGER`,
 `DMA_READY`, `ACPI_READY`, `PCIE_ENUMERATED`, `PCI_DEVICES`, `NVME_READY`,
 `GPT_ZIFS`, `ZIFS_PARTITION`, `STORAGE_READ_STRESS`, `ZIFS_DIRECT`, `ZIFS_MOUNT`,
-`CASE_SENSITIVE`, `ZIFS_FILE_READ`, `SERVICE_MANIFESTS`,
+`ZIFS_SECURITY`, `CASE_SENSITIVE`, `ZIFS_FILE_READ`, `SERVICE_MANIFESTS`,
 `SERVICE_DEPENDENCIES`, `FILESYSTEM_PE_SOURCE`, `USER_ADDRESS_SPACE`, `USER_PE_LOADED`,
 `USER_PE_RELOCATED`, `USER_IMPORTS_RESOLVED`, `USER_PARAMETERS`,
 `USER_TOKEN_BOUND`, `USER_PROCESS_SET`, `SYSCALL_READY`, `RING3_ENTER`,
@@ -93,7 +98,8 @@ three `USER_PROCESS_CLEAN` markers, `USER_PROCESS_SET_CLEAN`,
 `SCHEDULER_TICKS`, `PREEMPTION`, all four core service markers,
 `SERVICE_FAILURE_DETECTED`, `SERVICE_RESTART_LIMIT`, `SESSION_CHANNEL`,
 `SESSION_HOST`, `USER_CREATE_PROCESS`, `USER_WAIT_PROCESS`,
-`LUMA_CHILD_PROCESS`, `USER_LUMA_READY`, and `USER_SESSION`. It rejects `PANIC`,
+`LUMA_CHILD_PROCESS`, `USER_LUMA_READY`, `USER_SESSION`,
+`ZIFS_VOLUME_FLUSHED`, and `ZIFS_CLEAN_UNMOUNT`. It rejects `PANIC`,
 `STORAGE_MODULE_FALLBACK`, `STORAGE_TIMEOUT_SAFE`, and `GPT_CORRUPTION_SAFE`.
 
 `make fault-test` generates separate Limine configurations for deliberate
@@ -101,7 +107,7 @@ kernel invalid-opcode, ordinary kernel page-fault, active stack-guard, and user
 page-fault boots. The three kernel faults must reach exact diagnostics and halt
 through `PANIC`. The Ring-3 fault must emit `USER_FAULT_CONTAINED`, reclaim the
 process, avoid the fatal exception path, and continue through APIC pre-emption
-to the filesystem-backed user session.
+to the filesystem-backed user session and a clean ZiFS unmount.
 
 `make storage-test` runs two separate negative boots. One forces the NVMe
 initialisation timeout and requires `STORAGE_TIMEOUT_SAFE`; the other corrupts
@@ -111,7 +117,10 @@ provided, explicitly logged recovery module, complete the user-session proof,
 and then reach the explicit early recovery shell without `PANIC`.
 
 `make zifs-test` uses writable copies of the real GPT/NVMe image across
-twenty-seven boots. The first eight prove clean create/reboot, pre-commit
+thirty-two boots. The first four prove explicit clean unmount plus reboot with
+no recovery action, then interrupt unmount after its first durability boundary,
+inspect the unclean state, require `ZIFS_RECOVERY_UNCLEAN`, and cleanly unmount
+the recovered volume. The next eight prove clean create/reboot, pre-commit
 rollback, post-commit replay, slot-31-to-slot-0 journal wrap, and post-wrap
 persistence. The rename/move sequence case-only renames and then moves the
 populated PE from `C:\Program Files\Zizium\Hello Seed.exe` to
@@ -133,6 +142,11 @@ filesystem API or included in the ordinary system image. A final boot corrupts
 an ACE byte in the direct partition's checksummed `ZISD` table. It must emit
 `ZIFS_SECURITY_CORRUPTION_SAFE`, must not emit `ZIFS_DIRECT`, and may complete
 only through the explicitly enabled, uncorrupted recovery module.
+One additional case damages a redundant superblock, a redundant journal
+header, and the transaction-free mount lifecycle state in a persistent GPT
+copy. The host repair tool applies its reviewed three-action plan, reaches an
+empty fixed point, and the next boot must mount that repaired partition
+directly without any recovery marker.
 
 ## Disk image
 
@@ -167,6 +181,19 @@ The EFI system table address remains reserved for later firmware services.
 Programme files are read eagerly rather than through file objects or demand
 paging. Process execution remains synchronous; only one nested parent/child
 path is verified.
+
+The strict-diagnostic migration keeps Limine requests private to its adapter
+except the linker-root markers and relocation anchor. Those roots remain
+externally visible; the anchor preserves volatile qualifiers. No loader
+protocol or native image format changes. Boot validation must still prove
+all existing entry, framebuffer, storage, service, and user-process markers.
+
+The smoke gate additionally requires `SERVICE_POLICY_DENIED` (unknown SYSTEM
+service rejected by the actual launch provider) and `IMAGE_ACCESS_DENIED`
+(unlisted launch token rejected without a published process or pool leak).
+SessionHost's manifest now declares NID:SERVICE:SessionHost, and its restricted
+service token replaces synthetic SYSTEM:2. Rebuild images after this policy
+change; old SessionBootstrap/NID:SYSTEM declarations are rejected.
 
 ## Future
 

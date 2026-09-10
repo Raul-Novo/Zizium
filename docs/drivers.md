@@ -29,6 +29,12 @@ state or timeout. QEMU now proves durable ZiFS commit, reboot, rollback, and
 replay through this path. Representative keyboard and framebuffer `.sys`
 files still link only as import-free PE placeholders.
 
+The strict-diagnostic review added a host-tested NVMe MMIO-window contract.
+BAR0 must be nonzero, eight-byte aligned, bounded, and non-wrapping. After CAP
+is read, its doorbell stride must leave queue 1's completion doorbell wholly
+inside the mapped BAR. Unsupported windows fail before doorbell access. Tests
+cover alignment, overflow, unsupported stride, and the exact final-byte bound.
+
 ## Scaffolded
 
 Driver load and unload interfaces return `ZI_STATUS_NOT_IMPLEMENTED`. The

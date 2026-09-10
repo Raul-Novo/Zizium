@@ -9,7 +9,7 @@
 #include "zi/zifs_journal.h"
 #include "zizium/status.h"
 
-#define ZIFS_INSPECT_REPORT_VERSION UINT32_C(1)
+#define ZIFS_INSPECT_REPORT_VERSION UINT32_C(2)
 #define ZIFS_INSPECT_MAXIMUM_RECORD_SLOTS UINT64_C(65536)
 #define ZIFS_INSPECT_MAXIMUM_VOLUME_BLOCKS UINT64_C(16777216)
 
@@ -31,6 +31,7 @@ typedef struct ZiFsInspectReport {
   uint32_t selected_journal_copy;
   uint32_t needs_recovery;
   uint32_t inspected_replay_view;
+  uint32_t unclean_mount;
   uint64_t occupied_journal_records;
   uint64_t journal_begin_records;
   uint64_t journal_block_images;

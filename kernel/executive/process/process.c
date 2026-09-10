@@ -110,6 +110,8 @@ static ZiStatus public_message_to_internal(const ZiChannelMessage* source, ZiMes
 static void internal_message_to_public(const ZiMessage* source, ZiChannelMessage* destination);
 static void terminate_invalid_return(ZiSyscallFrame* frame);
 static ZiUserProcess* find_empty_process(ZiUserProcessManager* manager);
+static ZiUserProcess* find_process_object(ZiUserProcessManager* manager,
+                                          const ZiObjectHeader* object);
 static bool process_belongs_to_manager(const ZiUserProcessManager* manager,
                                        const ZiUserProcess* process);
 static ZiStatus align_page_size(size_t size, size_t* out_size);
@@ -746,7 +748,7 @@ static ZiStatus dispatch_close_handle(const ZiSyscallFrame* frame) {
   }
   ZiUserProcess* child = NULL;
   if (object->type == &k_process_object_type) {
-    child = (ZiUserProcess*)((unsigned char*)object - offsetof(ZiUserProcess, object));
+    child = find_process_object(s_manager, object);
     if (!process_belongs_to_manager(s_manager, child) ||
         child->parent != s_manager->active_process || child->state == ZI_USER_PROCESS_RUNNING) {
       (void)zi_object_dereference(object);
@@ -835,7 +837,7 @@ static ZiStatus dispatch_wait_for_object(const ZiSyscallFrame* frame) {
     return status;
   }
   ZiUserProcess* parent = s_manager->active_process;
-  ZiUserProcess* child = (ZiUserProcess*)((unsigned char*)object - offsetof(ZiUserProcess, object));
+  ZiUserProcess* child = find_process_object(s_manager, object);
   if (!process_belongs_to_manager(s_manager, child) || child->parent != parent) {
     status = ZI_STATUS_INVALID_HANDLE;
   } else if (child->state == ZI_USER_PROCESS_INITIALISED && frame->argument_2 != 0) {
@@ -1008,6 +1010,18 @@ static void terminate_invalid_return(ZiSyscallFrame* frame) {
 static ZiUserProcess* find_empty_process(ZiUserProcessManager* manager) {
   for (size_t index = 0; index < ZI_USER_PROCESS_MANAGER_CAPACITY; ++index) {
     if (manager->processes[index].state == ZI_USER_PROCESS_EMPTY) {
+      return &manager->processes[index];
+    }
+  }
+  return NULL;
+}
+
+static ZiUserProcess* find_process_object(ZiUserProcessManager* manager,
+                                          const ZiObjectHeader* object) {
+  // Resolve ownership before recovering a process, rather than subtracting from
+  // a potentially foreign object pointer. The current manager has four slots.
+  for (size_t index = 0; index < ZI_USER_PROCESS_MANAGER_CAPACITY; ++index) {
+    if (&manager->processes[index].object == object) {
       return &manager->processes[index];
     }
   }

@@ -28,6 +28,10 @@ identifiers. A process owns versioned `ZxProcess`, `ZxThread`,
 
 The AMD64 Native-subsystem PE and its bounded DLL dependency graph are read
 from exact-case ZiFS regular files through a size-limited allocator provider.
+Each directory traversal and EXE/DLL source is ACL-checked under the exact token
+which will be copied into the new process. The initial ordinary-C acceptance
+tokens and Luma use Users rather than Administrators membership. Bootstrap
+service issuance is restricted to the explicit policy in [services.md](services.md).
 The loader validates and maps them,
 forces the main image away from its preferred base in the acceptance path,
 applies DIR64 relocations, resolves named or ordinal imports, and applies final
@@ -93,6 +97,11 @@ interrupted CS privilege level. A contained user exception records its vector,
 selects a private assembly termination sentinel, and never rewrites an
 untrusted return frame into a kernel return. Kernel exceptions retain the fatal
 bounded diagnostic policy.
+
+Handle close/wait now resolve a process object against the manager's bounded
+owned slots instead of constructing a containing-process pointer from an
+unchecked byte offset. Existing type, parent, lifecycle, and ownership checks
+still apply. Token storage shares the executive's 16-group validation bound.
 
 ## Scaffolded
 

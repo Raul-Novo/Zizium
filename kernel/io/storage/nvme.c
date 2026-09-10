@@ -15,6 +15,7 @@
 #include "zi/io.h"
 #include "zi/kernel_memory.h"
 #include "zi/memory.h"
+#include "zi/nvme_registers.h"
 #include "zi/pci.h"
 #include "zizium/status.h"
 #include "zizium/types.h"
@@ -32,9 +33,7 @@
 #define NVME_CC_IO_COMPLETION_ENTRY_SIZE (UINT32_C(4) << 20)
 #define NVME_CSTS_READY UINT32_C(1)
 #define NVME_CSTS_FATAL UINT32_C(2)
-#define NVME_ADMIN_DELETE_IO_SUBMISSION_QUEUE UINT8_C(0x00)
 #define NVME_ADMIN_CREATE_IO_SUBMISSION_QUEUE UINT8_C(0x01)
-#define NVME_ADMIN_DELETE_IO_COMPLETION_QUEUE UINT8_C(0x04)
 #define NVME_ADMIN_CREATE_IO_COMPLETION_QUEUE UINT8_C(0x05)
 #define NVME_ADMIN_IDENTIFY UINT8_C(0x06)
 #define NVME_IO_FLUSH UINT8_C(0x00)
@@ -47,10 +46,7 @@
 #define NVME_PCI_CLASS_STORAGE UINT8_C(0x01)
 #define NVME_PCI_SUBCLASS_NVM UINT8_C(0x08)
 #define NVME_PCI_INTERFACE UINT8_C(0x02)
-#define NVME_MINIMUM_REGISTER_SIZE UINT64_C(0x2000)
-#define NVME_MAXIMUM_REGISTER_SIZE (UINT64_C(128) * 1024 * 1024)
 #define NVME_QUEUE_IDENTIFIER UINT16_C(1)
-#define NVME_NAMESPACE_LIST_COUNT 1024u
 #define NVME_IDENTIFY_CONTROLLER_NAMESPACE_COUNT_OFFSET 516u
 #define NVME_IDENTIFY_NAMESPACE_FORMAT_OFFSET 26u
 #define NVME_IDENTIFY_NAMESPACE_FORMATS_OFFSET 128u
@@ -123,14 +119,14 @@ ZiStatus zi_nvme_initialise(const ZiPciConfigAccess* pci_access,
       pci_device == NULL || pci_device->struct_size < sizeof *pci_device ||
       pci_device->version != ZI_PCI_DEVICE_VERSION || pci_device_object == NULL ||
       dma_allocator == NULL || out_controller == NULL ||
-      (flags & ~ZI_NVME_INITIALISE_FORCE_TIMEOUT) != 0 ||
+      (flags & ~(uint32_t)ZI_NVME_INITIALISE_FORCE_TIMEOUT) != 0 ||
       pci_device->class_code != NVME_PCI_CLASS_STORAGE ||
       pci_device->subclass != NVME_PCI_SUBCLASS_NVM ||
       pci_device->programming_interface != NVME_PCI_INTERFACE ||
-      pci_device->bars[0].kind != ZI_PCI_BAR_MEMORY || pci_device->bars[0].base_address == 0 ||
-      pci_device->bars[0].size < NVME_MINIMUM_REGISTER_SIZE ||
-      pci_device->bars[0].size > NVME_MAXIMUM_REGISTER_SIZE ||
-      pci_device->bars[0].size > SIZE_MAX) {
+      pci_device->bars[0].kind != ZI_PCI_BAR_MEMORY ||
+      ZiFailed(zi_nvme_register_window_validate(pci_device->bars[0].base_address,
+                                                pci_device->bars[0].size,
+                                                4))) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }
 
@@ -250,23 +246,29 @@ const ZiBlockDevice* zi_nvme_block_device(const ZiNvmeController* controller) {
 }
 
 static uint32_t register_read32(const ZiNvmeController* controller, uint32_t offset) {
-  const volatile uint32_t* pointer = (const volatile uint32_t*)(controller->registers + offset);
+  // MMIO is not a C byte-array object. The BAR is eight-byte aligned; fixed
+  // register offsets and validated doorbells preserve their access alignment.
+  uintptr_t address = (uintptr_t)controller->registers + offset;
+  const volatile uint32_t* pointer = (const volatile uint32_t*)address;
   return *pointer;
 }
 
 static uint64_t register_read64(const ZiNvmeController* controller, uint32_t offset) {
-  const volatile uint64_t* pointer = (const volatile uint64_t*)(controller->registers + offset);
+  uintptr_t address = (uintptr_t)controller->registers + offset;
+  const volatile uint64_t* pointer = (const volatile uint64_t*)address;
   return *pointer;
 }
 
 static void register_write32(ZiNvmeController* controller, uint32_t offset, uint32_t value) {
-  volatile uint32_t* pointer = (volatile uint32_t*)(controller->registers + offset);
+  uintptr_t address = (uintptr_t)controller->registers + offset;
+  volatile uint32_t* pointer = (volatile uint32_t*)address;
   *pointer = value;
   ZkArchMemoryBarrier();
 }
 
 static void register_write64(ZiNvmeController* controller, uint32_t offset, uint64_t value) {
-  volatile uint64_t* pointer = (volatile uint64_t*)(controller->registers + offset);
+  uintptr_t address = (uintptr_t)controller->registers + offset;
+  volatile uint64_t* pointer = (volatile uint64_t*)address;
   *pointer = value;
   ZkArchMemoryBarrier();
 }
@@ -773,6 +775,15 @@ static ZiStatus validate_capabilities(ZiNvmeController* controller, uint64_t cap
     return ZI_STATUS_INVALID_STATE;
   }
   controller->doorbell_stride = UINT32_C(1) << stride_shift;
+  // Queue zero and queue one are the only queues owned by this driver. A
+  // controller-provided stride must keep even the last doorbell inside BAR0.
+  ZiStatus window_status =
+      zi_nvme_register_window_validate(controller->pci_device.bars[0].base_address,
+                                       controller->pci_device.bars[0].size,
+                                       controller->doorbell_stride);
+  if (ZiFailed(window_status)) {
+    return window_status;
+  }
   uint32_t version = register_read32(controller, NVME_REGISTER_VERSION);
   return version == 0 ? ZI_STATUS_INVALID_STATE : ZI_STATUS_SUCCESS;
 }

@@ -25,6 +25,7 @@ CORE_SOURCES = (
     "kernel/fs/vfs/path.c",
     "kernel/display/display.c",
     "kernel/executive/security/access_check.c",
+    "kernel/executive/security/identity.c",
     "kernel/executive/runtime/executive_lock.c",
     "kernel/executive/object/object.c",
     "kernel/executive/wait/dispatcher.c",
@@ -42,6 +43,7 @@ CORE_SOURCES = (
     "kernel/fs/zifs/recovery.c",
     "kernel/io/storage/block.c",
     "kernel/io/storage/gpt.c",
+    "kernel/io/storage/nvme_registers.c",
     "kernel/io/bus/acpi.c",
     "kernel/io/bus/pci.c",
     "kernel/input/input.c",
@@ -50,6 +52,7 @@ CORE_SOURCES = (
     "kernel/io/driver/driver.c",
     "kernel/executive/ipc/ipc.c",
     "kernel/executive/service/manifest.c",
+    "kernel/executive/service/identity.c",
     "kernel/executive/handle/handle.c",
     "kernel/executive/process/address_space.c",
     "kernel/executive/process/parameters.c",
@@ -91,6 +94,40 @@ KERNEL_ASSEMBLY_SOURCES = (
     "kernel/arch/x64/asm/interrupts.asm",
     "kernel/arch/x64/asm/syscall.asm",
 )
+
+HOST_TEST_SUPPORT_SOURCES = (
+    "tools/zifsinspect/inspect.c",
+    "tools/zifsrepair/repair.c",
+)
+
+# All project-owned C targets share the goal's diagnostic contract. Do not
+# weaken this policy to advance a milestone; see docs/build.md.
+PROJECT_WARNING_FLAGS = ("/clang:-Weverything", "/clang:-Werror")
+
+
+def source_warning_flags(source: Path) -> list[str]:
+    flags = list(PROJECT_WARNING_FLAGS)
+    if source.suffix == ".c":
+        # C17 intentionally permits mixed declarations and implicit void* conversion.
+        # The buffer diagnostic requires C++-style encapsulation, not proof of
+        # a bad range. C uses explicit pointer/length contracts and checked ranges.
+        # Keep actual bounds/conversion/alignment diagnostics and analysers enabled.
+        # These exceptions never carry over to future C++ sources. See docs/build.md.
+        flags.extend([
+            "/clang:-Wno-declaration-after-statement",
+            # C17 requires C11 features such as _Static_assert and _Alignof.
+            "/clang:-Wno-pre-c11-compat",
+            "/clang:-Wno-c++-compat",
+            "/clang:-Wno-unsafe-buffer-usage",
+            # Natural alignment padding is intentional; wire data uses byte codecs
+            # and ABI offsets use static assertions. Never pack/reorder to silence it.
+            "/clang:-Wno-padded",
+        ])
+    if source.name == "main.c" and source.parent.name == "pecheck":
+        # The enum switch deliberately retains an invalid-value fallback while
+        # -Wswitch-enum continues checking every named kind.
+        flags.append("/clang:-Wno-covered-switch-default")
+    return flags
 
 
 class BuildFailure(RuntimeError):
@@ -167,6 +204,7 @@ def compile_host_source(
         "/utf-8",
         "/W4",
         "/WX",
+        *source_warning_flags(source),
         "/Brepro",
         f"/I{root / 'sdk' / 'include'}",
         f"/I{root / 'kernel' / 'include'}",
@@ -227,6 +265,12 @@ def host_build(root: Path, configuration: str, *, sanitised: bool = False) -> Pa
             root / "tools" / "zifsinspect" / "main.c",
             root / "tools" / "zifsinspect" / "inspect.c",
         ),
+        "zifsrepair.exe": (
+            root / "tools" / "zifsrepair" / "main.c",
+            root / "tools" / "zifsrepair" / "repair.c",
+            root / "tools" / "zifsrepair" / "source.c",
+            root / "tools" / "zifsinspect" / "inspect.c",
+        ),
         "zsvccheck.exe": (root / "tools" / "zsvccheck" / "main.c",),
         "zcc.exe": (root / "tools" / "zcc" / "main.c",),
     }
@@ -239,7 +283,7 @@ def host_build(root: Path, configuration: str, *, sanitised: bool = False) -> Pa
             )
             compile_host_source(compiler, root, source, tool_object, configuration)
             tool_objects.append(tool_object)
-            if output_name == "zifsinspect.exe" and source.stem == "inspect":
+            if source.name in {"inspect.c", "repair.c"} and tool_object not in tool_support_objects:
                 tool_support_objects.append(tool_object)
         link_host_executable(
             compiler,
@@ -288,6 +332,7 @@ def compile_kernel_source(
         "/utf-8",
         "/W4",
         "/WX",
+        *source_warning_flags(source),
         "/Brepro",
         "/GS-",
         "/Zl",
@@ -297,7 +342,7 @@ def compile_kernel_source(
         *extra_flags,
         f"/I{root / 'sdk' / 'include'}",
         f"/I{root / 'kernel' / 'include'}",
-        f"/I{root / 'external' / 'deps' / 'limine-protocol'}",
+        f"/external:I{root / 'external' / 'deps' / 'limine-protocol'}",
         f"/Fo{output}",
     ]
     if configuration == "release":
@@ -702,6 +747,7 @@ def header_check(root: Path, configuration: str) -> None:
                 "/utf-8",
                 "/W4",
                 "/WX",
+                *source_warning_flags(probe),
                 f"/I{root / 'sdk' / 'include'}",
                 f"/I{root / 'sdk' / 'crt' / 'include'}",
                 f"/I{root / 'kernel' / 'include'}",
@@ -726,6 +772,7 @@ def intel_validation(root: Path, configuration: str) -> Path:
     output = build_root / "tests" / "zizium_host_tests_intel.exe"
     output.parent.mkdir(parents=True, exist_ok=True)
     sources = [str(root / source) for source in CORE_SOURCES]
+    sources.extend(str(root / source) for source in HOST_TEST_SUPPORT_SOURCES)
     sources.append(str(generated_font))
     sources.extend(
         str(path) for path in sorted((root / "tests" / "host").glob("*_test.c"))
@@ -738,6 +785,7 @@ def intel_validation(root: Path, configuration: str) -> Path:
         "/utf-8",
         "/W4",
         "/WX",
+        *source_warning_flags(root / "tests" / "host" / "test_main.c"),
         "/Brepro",
         f"/I{root / 'sdk' / 'include'}",
         f"/I{root / 'kernel' / 'include'}",
@@ -747,6 +795,20 @@ def intel_validation(root: Path, configuration: str) -> Path:
     else:
         command.extend(["/Od", "/Zi", "/DZI_DEBUG=1"])
     command.extend([*sources, f"/Fe{output}"])
+    # Locating icx.exe alone does not add its static runtime to MSVC's LIB path.
+    # Use the runtime adjacent to that exact compiler, never an unrelated install.
+    intel_runtime = Path(compiler).resolve().parent.parent / "lib"
+    if (intel_runtime / "libircmt.lib").is_file():
+        command.extend(["/link", f"/libpath:{intel_runtime}"])
+    elif not any(
+        (Path(directory) / "libircmt.lib").is_file()
+        for directory in os.environ.get("LIB", "").split(os.pathsep)
+        if directory
+    ):
+        raise BuildFailure(
+            "Intel's libircmt.lib is missing. Load the matching oneAPI compiler "
+            "environment or repair that compiler installation; normal artefacts are preserved."
+        )
     run(command, root=root)
     run([str(output)], root=root)
     return output
@@ -1035,7 +1097,7 @@ def boot_test(root: Path, configuration: str) -> None:
         ]
     )
     serial_output = run_headless_qemu(
-        root, command, serial_path, ("[ZI:BOOT:USER_SESSION]",)
+        root, command, serial_path, ("[ZI:BOOT:ZIFS_CLEAN_UNMOUNT]",)
     )
     print("--- QEMU serial smoke-test output ---")
     print(serial_output, end="" if serial_output.endswith("\n") else "\n")
@@ -1096,6 +1158,8 @@ def boot_test(root: Path, configuration: str) -> None:
         "[ZI:BOOT:PREEMPTION]",
         "[ZI:BOOT:SERVICE_HOST]",
         "[ZI:BOOT:SERVICE_FAILURE_DETECTED]",
+        "[ZI:BOOT:SERVICE_POLICY_DENIED]",
+        "[ZI:BOOT:IMAGE_ACCESS_DENIED]",
         "[ZI:BOOT:SERVICE_RESTART_LIMIT]",
         "[ZI:BOOT:SECURITY_HOST]",
         "[ZI:BOOT:LOG_HOST]",
@@ -1108,6 +1172,8 @@ def boot_test(root: Path, configuration: str) -> None:
         "[ZI:BOOT:USER_LUMA]",
         "[ZI:BOOT:USER_LUMA_READY]",
         "[ZI:BOOT:USER_SESSION]",
+        "[ZI:BOOT:ZIFS_VOLUME_FLUSHED]",
+        "[ZI:BOOT:ZIFS_CLEAN_UNMOUNT]",
     ]
     missing = [marker for marker in required_markers if marker not in serial_output]
     framebuffer_marked = (
@@ -1365,12 +1431,70 @@ def corrupt_zifs_security_table(image_path: Path) -> None:
         os.fsync(image.fileno())
 
 
+def create_zifs_gpt_repair_fixture(image_path: Path) -> None:
+    sector_size = 512
+    gpt_entry_offset = 2 * sector_size + 128
+    with image_path.open("r+b") as image:
+        image.seek(gpt_entry_offset)
+        entry = image.read(128)
+        if len(entry) != 128:
+            raise BuildFailure("The repair fixture has a truncated GPT entry.")
+        first_lba = int.from_bytes(entry[32:40], "little")
+        final_lba = int.from_bytes(entry[40:48], "little")
+        if first_lba == 0 or final_lba < first_lba:
+            raise BuildFailure("The repair fixture has an invalid ZiFS GPT entry.")
+        partition_offset = first_lba * sector_size
+        partition_size = (final_lba - first_lba + 1) * sector_size
+        image.seek(partition_offset)
+        primary = bytearray(image.read(4096))
+        if len(primary) != 4096 or primary[:8] != b"ZiFS\r\n\x1a\n":
+            raise BuildFailure("The repair fixture has no valid ZiFS primary superblock.")
+        total_blocks = int.from_bytes(primary[64:72], "little")
+        backup_block = int.from_bytes(primary[160:168], "little")
+        journal_start = int.from_bytes(primary[128:136], "little")
+        if (
+            total_blocks == 0
+            or total_blocks * 4096 > partition_size
+            or backup_block != total_blocks - 1
+            or journal_start + 1 >= total_blocks
+        ):
+            raise BuildFailure("The repair fixture has an invalid ZiFS metadata layout.")
+
+        for block_number in (0, backup_block):
+            image.seek(partition_offset + block_number * 4096)
+            encoded = bytearray(image.read(4096))
+            if len(encoded) != 4096:
+                raise BuildFailure("The repair fixture has a truncated superblock copy.")
+            encoded[244:248] = (1 << 1).to_bytes(4, "little")
+            encoded[252:256] = crc32c(encoded[:252]).to_bytes(4, "little")
+            image.seek(partition_offset + block_number * 4096)
+            image.write(encoded)
+
+        image.seek(partition_offset + 252)
+        checksum_byte = image.read(1)
+        if len(checksum_byte) != 1:
+            raise BuildFailure("The repair fixture primary checksum is truncated.")
+        image.seek(partition_offset + 252)
+        image.write(bytes((checksum_byte[0] ^ 0x21,)))
+
+        journal_offset = partition_offset + journal_start * 4096 + 8
+        image.seek(journal_offset)
+        journal_byte = image.read(1)
+        if len(journal_byte) != 1:
+            raise BuildFailure("The repair fixture journal header is truncated.")
+        image.seek(journal_offset)
+        image.write(bytes((journal_byte[0] ^ 0x21,)))
+        image.flush()
+        os.fsync(image.fileno())
+
+
 def zifs_write_test(root: Path, configuration: str) -> None:
     build_root = host_build(root, configuration)
     kernel_path = kernel_build(root, configuration, build_root)
     native_outputs = native_artifacts_build(root, configuration, build_root)
     pecheck = build_root / "host" / "pecheck.exe"
     zifs_inspector = build_root / "host" / "zifsinspect.exe"
+    zifs_repair = build_root / "host" / "zifsrepair.exe"
     run([str(pecheck), "--kind", "kernel", str(kernel_path)], root=root)
 
     source_configuration = root / "boot" / "limine" / "limine.conf"
@@ -1418,6 +1542,10 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         "grow-directory": "zi.test=zifs-grow-directory",
         "grow-directory-verify": "zi.test=zifs-grow-directory-verify",
         "security-corrupt": "zi.test=zifs-security-corrupt",
+        "clean-unmount": "zi.test=zifs-clean-unmount",
+        "clean-unmount-verify": "zi.test=zifs-clean-unmount-verify",
+        "unmount-crash": "zi.test=zifs-unmount-crash",
+        "unmount-recover": "zi.test=zifs-unmount-recover",
     }
     case_images: dict[str, Path] = {}
     for case_name, token in case_tokens.items():
@@ -1444,6 +1572,7 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         required_markers: tuple[str, ...],
         forbidden_markers: tuple[str, ...] = (),
         allow_module_fallback: bool = False,
+        expect_clean_unmount: bool = True,
     ) -> None:
         variables_path = firmware_directory / f"edk2-vars-zifs-{case_name}.fd"
         shutil.copyfile(variables_template, variables_path)
@@ -1459,17 +1588,36 @@ def zifs_write_test(root: Path, configuration: str) -> None:
                 "chardev:zi_serial",
             ]
         )
+        effective_required_markers = required_markers
+        effective_forbidden_markers = forbidden_markers
+        if expect_clean_unmount:
+            effective_required_markers = (
+                *effective_required_markers,
+                "[ZI:BOOT:ZIFS_VOLUME_FLUSHED]",
+                "[ZI:BOOT:ZIFS_CLEAN_UNMOUNT]",
+            )
+        else:
+            effective_forbidden_markers = (
+                *effective_forbidden_markers,
+                "[ZI:BOOT:ZIFS_CLEAN_UNMOUNT]",
+            )
         serial_output = run_headless_qemu(
             root,
             command,
             serial_path,
-            (required_markers[-1],),
+            (effective_required_markers[-1],),
             timeout_seconds=30.0,
         )
         print(f"--- QEMU {case_name} ZiFS-test output ---")
         print(serial_output, end="" if serial_output.endswith("\n") else "\n")
-        missing = [marker for marker in required_markers if marker not in serial_output]
-        present = [marker for marker in forbidden_markers if marker in serial_output]
+        missing = [
+            marker for marker in effective_required_markers if marker not in serial_output
+        ]
+        present = [
+            marker
+            for marker in effective_forbidden_markers
+            if marker in serial_output
+        ]
         if missing:
             raise BuildFailure(
                 f"The {case_name} ZiFS test missed markers: {', '.join(missing)}."
@@ -1503,6 +1651,120 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         "[ZI:BOOT:ZIFS_RECOVERY_REPAIR]",
         "[ZI:BOOT:ZIFS_RECOVERY_ROLLBACK]",
         "[ZI:BOOT:ZIFS_RECOVERY_REPLAY]",
+        "[ZI:BOOT:ZIFS_RECOVERY_UNCLEAN]",
+    )
+
+    clean_unmount_storage = image_directory / "zizium-zifs-clean-unmount-reboot.img"
+    shutil.copyfile(case_images["clean-unmount"], clean_unmount_storage)
+    run_case(
+        "clean-unmount",
+        clean_unmount_storage,
+        (*common_markers, "[ZI:BOOT:ZIFS_CLEAN_UNMOUNT_REQUESTED]"),
+        recovery_markers,
+    )
+    run_zifs_inspector_case(
+        root,
+        zifs_inspector,
+        clean_unmount_storage,
+        0,
+        (
+            "Generation: 1, cleanly unmounted",
+            "Result: valid ZiFS metadata",
+        ),
+        None,
+        mode="--gpt",
+    )
+    copy_efi_system_partition(
+        case_images["clean-unmount-verify"], clean_unmount_storage
+    )
+    run_case(
+        "clean-unmount-reboot",
+        clean_unmount_storage,
+        (*common_markers, "[ZI:BOOT:ZIFS_CLEAN_UNMOUNT_PERSISTED]"),
+        recovery_markers,
+    )
+
+    offline_repair_storage = image_directory / "zizium-zifs-offline-repair.img"
+    shutil.copyfile(case_images["clean-unmount-verify"], offline_repair_storage)
+    create_zifs_gpt_repair_fixture(offline_repair_storage)
+    repair_plan_output = run_zifs_repair_command(
+        root,
+        zifs_repair,
+        ["plan", "--gpt", str(offline_repair_storage)],
+        offline_repair_storage,
+        0,
+        None,
+        expect_mutation=False,
+    )
+    if "Actions: 3" not in repair_plan_output:
+        raise BuildFailure("The GPT repair smoke fixture did not produce three bounded actions.")
+    repair_token = extract_zifs_repair_token(
+        repair_plan_output, offline_repair_storage
+    )
+    run_zifs_repair_command(
+        root,
+        zifs_repair,
+        ["apply", "--gpt", str(offline_repair_storage), repair_token],
+        offline_repair_storage,
+        0,
+        None,
+        expect_mutation=True,
+    )
+    run_zifs_inspector_case(
+        root,
+        zifs_inspector,
+        offline_repair_storage,
+        0,
+        (
+            "Container: GPT image with ZiFS partition",
+            "Generation: 1, cleanly unmounted",
+            "Result: valid ZiFS metadata",
+        ),
+        None,
+        mode="--gpt",
+    )
+    run_case(
+        "offline-repair-reboot",
+        offline_repair_storage,
+        (*common_markers, "[ZI:BOOT:ZIFS_CLEAN_UNMOUNT_PERSISTED]"),
+        recovery_markers,
+    )
+
+    unmount_crash_storage = image_directory / "zizium-zifs-unmount-crash-reboot.img"
+    shutil.copyfile(case_images["unmount-crash"], unmount_crash_storage)
+    run_case(
+        "unmount-crash",
+        unmount_crash_storage,
+        (*common_markers, "[ZI:BOOT:ZIFS_UNMOUNT_CRASH_BOUNDARY]"),
+        recovery_markers,
+        expect_clean_unmount=False,
+    )
+    run_zifs_inspector_case(
+        root,
+        zifs_inspector,
+        unmount_crash_storage,
+        1,
+        (
+            "interrupted without a clean unmount",
+            "Result: metadata is readable but requires recovery or repair",
+        ),
+        None,
+        mode="--gpt",
+    )
+    copy_efi_system_partition(case_images["unmount-recover"], unmount_crash_storage)
+    run_case(
+        "unmount-recovery",
+        unmount_crash_storage,
+        (
+            *common_markers,
+            "[ZI:BOOT:ZIFS_RECOVERY_UNCLEAN]",
+            "[ZI:BOOT:ZIFS_UNCLEAN_UNMOUNT_RECOVERED]",
+        ),
+        (
+            "[ZI:BOOT:ZIFS_RECOVERY_REPAIR]",
+            "[ZI:BOOT:ZIFS_RECOVERY_ROLLBACK]",
+            "[ZI:BOOT:ZIFS_RECOVERY_REPLAY]",
+        ),
     )
 
     clean_storage = image_directory / "zizium-zifs-clean-reboot.img"
@@ -1543,6 +1805,7 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         rollback_storage,
         (*common_markers, "[ZI:BOOT:ZIFS_CRASH_ROLLBACK_BOUNDARY]"),
         recovery_markers,
+        expect_clean_unmount=False,
     )
     copy_efi_system_partition(case_images["verify-absent"], rollback_storage)
     run_case(
@@ -1566,6 +1829,7 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         replay_storage,
         (*common_markers, "[ZI:BOOT:ZIFS_CRASH_REPLAY_BOUNDARY]"),
         recovery_markers,
+        expect_clean_unmount=False,
     )
     run_zifs_inspector_case(
         root,
@@ -1668,6 +1932,7 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         move_rollback_storage,
         (*common_markers, "[ZI:BOOT:ZIFS_MOVE_CRASH_ROLLBACK_BOUNDARY]"),
         recovery_markers,
+        expect_clean_unmount=False,
     )
     copy_efi_system_partition(case_images["move-verify-old"], move_rollback_storage)
     run_case(
@@ -1691,6 +1956,7 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         move_replay_storage,
         (*common_markers, "[ZI:BOOT:ZIFS_MOVE_CRASH_REPLAY_BOUNDARY]"),
         recovery_markers,
+        expect_clean_unmount=False,
     )
     copy_efi_system_partition(case_images["move-verify-new"], move_replay_storage)
     run_case(
@@ -1736,6 +2002,7 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         truncate_rollback_storage,
         (*common_markers, "[ZI:BOOT:ZIFS_TRUNCATE_CRASH_ROLLBACK_BOUNDARY]"),
         recovery_markers,
+        expect_clean_unmount=False,
     )
     copy_efi_system_partition(
         case_images["truncate-verify-old"], truncate_rollback_storage
@@ -1763,6 +2030,7 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         truncate_replay_storage,
         (*common_markers, "[ZI:BOOT:ZIFS_TRUNCATE_CRASH_REPLAY_BOUNDARY]"),
         recovery_markers,
+        expect_clean_unmount=False,
     )
     copy_efi_system_partition(
         case_images["truncate-verify-new"], truncate_replay_storage
@@ -1788,6 +2056,7 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         delete_rollback_storage,
         (*common_markers, "[ZI:BOOT:ZIFS_DELETE_CRASH_ROLLBACK_BOUNDARY]"),
         recovery_markers,
+        expect_clean_unmount=False,
     )
     copy_efi_system_partition(
         case_images["delete-verify-old"], delete_rollback_storage
@@ -1813,6 +2082,7 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         delete_replay_storage,
         (*common_markers, "[ZI:BOOT:ZIFS_DELETE_CRASH_REPLAY_BOUNDARY]"),
         recovery_markers,
+        expect_clean_unmount=False,
     )
     copy_efi_system_partition(case_images["delete-verify-new"], delete_replay_storage)
     run_case(
@@ -1852,8 +2122,8 @@ def zifs_write_test(root: Path, configuration: str) -> None:
     )
     print(
         "QEMU ZiFS create, growth, multi-block directory, wrap, rename, move, "
-        "truncate, delete, reclamation, security-corruption, rollback, and replay "
-        "tests passed across twenty-seven boots."
+        "truncate, delete, reclamation, offline repair, security-corruption, rollback, "
+        "and replay tests passed across thirty-two boots."
     )
 
 
@@ -2014,7 +2284,7 @@ def fault_test(root: Path, configuration: str) -> None:
         ]
     )
     serial_output = run_headless_qemu(
-        root, command, serial_path, ("[ZI:BOOT:USER_SESSION]",)
+        root, command, serial_path, ("[ZI:BOOT:ZIFS_CLEAN_UNMOUNT]",)
     )
     print("--- QEMU user-fault containment output ---")
     print(serial_output, end="" if serial_output.endswith("\n") else "\n")
@@ -2034,6 +2304,8 @@ def fault_test(root: Path, configuration: str) -> None:
         "[ZI:BOOT:APIC_TIMER]",
         "[ZI:BOOT:PREEMPTION]",
         "[ZI:BOOT:USER_LUMA_READY]",
+        "[ZI:BOOT:ZIFS_VOLUME_FLUSHED]",
+        "[ZI:BOOT:ZIFS_CLEAN_UNMOUNT]",
     )
     missing = [marker for marker in required_markers if marker not in serial_output]
     if missing:
@@ -2083,6 +2355,17 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def crc32c(data: bytes) -> int:
+    checksum = 0xFFFFFFFF
+    for value in data:
+        checksum ^= value
+        for _ in range(8):
+            checksum = (checksum >> 1) ^ (
+                0x82F63B78 if checksum & 1 else 0
+            )
+    return (~checksum) & 0xFFFFFFFF
+
+
 def mutate_zifs_inspection_fixture(path: Path, mutation: str) -> None:
     with path.open("r+b") as file:
         superblock = file.read(256)
@@ -2095,6 +2378,23 @@ def mutate_zifs_inspection_fixture(path: Path, mutation: str) -> None:
         journal_start = int.from_bytes(superblock[128:136], "little")
         security_start = int.from_bytes(superblock[144:152], "little")
         total_blocks = int.from_bytes(superblock[64:72], "little")
+        if mutation == "unclean-mount":
+            for block_number in (0, total_blocks - 1):
+                file.seek(block_number * 4096)
+                encoded_superblock = bytearray(file.read(4096))
+                if len(encoded_superblock) != 4096:
+                    raise BuildFailure(
+                        "The ZiFS unclean-mount fixture has a truncated superblock."
+                    )
+                encoded_superblock[244:248] = (1 << 1).to_bytes(4, "little")
+                encoded_superblock[252:256] = crc32c(
+                    encoded_superblock[:252]
+                ).to_bytes(4, "little")
+                file.seek(block_number * 4096)
+                file.write(encoded_superblock)
+            file.flush()
+            os.fsync(file.fileno())
+            return
         offsets: list[int]
         if mutation == "primary-superblock":
             offsets = [252]
@@ -2227,6 +2527,17 @@ def zifs_inspector_tests(
         environment,
         mode=None,
     )
+    unicode_path_fixture = fixture_directory / "Volumen ZiFS — inspección.zifs"
+    shutil.copyfile(source_image, unicode_path_fixture)
+    run_zifs_inspector_case(
+        root,
+        inspector,
+        unicode_path_fixture,
+        0,
+        ("Result: valid ZiFS metadata",),
+        environment,
+        mode=None,
+    )
     empty_input = fixture_directory / "empty-input.bin"
     empty_input.write_bytes(b"")
     multi_block_fixture = fixture_directory / "multi-block-directory.zifs"
@@ -2269,6 +2580,14 @@ def zifs_inspector_tests(
     )
     cases = (
         (
+            "unclean-mount",
+            (
+                "Generation: 1, mounted",
+                "interrupted without a clean unmount",
+                "requires recovery or repair",
+            ),
+        ),
+        (
             "primary-superblock",
             ("Selected superblock: backup", "requires recovery or repair"),
         ),
@@ -2305,7 +2624,235 @@ def zifs_inspector_tests(
             required_text,
             environment,
         )
-    print("ZiFS read-only inspector acceptance tests passed across eleven fixtures.")
+    print("ZiFS read-only inspector acceptance tests passed across thirteen fixtures.")
+
+
+def run_zifs_repair_command(
+    root: Path,
+    repair: Path,
+    arguments: list[str],
+    fixture: Path,
+    expected_exit: int,
+    environment: dict[str, str] | None,
+    *,
+    expect_mutation: bool,
+) -> str:
+    command = [str(repair), *arguments]
+    print("+ " + subprocess.list2cmdline(command), flush=True)
+    before_hash = file_sha256(fixture)
+    result = subprocess.run(
+        command,
+        cwd=root,
+        check=False,
+        text=True,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    print(result.stdout, end="")
+    after_hash = file_sha256(fixture)
+    if result.returncode != expected_exit:
+        raise BuildFailure(
+            f"zifsrepair returned {result.returncode}; expected {expected_exit} "
+            f"for '{fixture.name}'."
+        )
+    if expect_mutation == (before_hash == after_hash):
+        expected = "modify" if expect_mutation else "preserve"
+        raise BuildFailure(
+            f"zifsrepair did not {expected} fixture '{fixture.name}' as expected."
+        )
+    return result.stdout
+
+
+def extract_zifs_repair_token(output: str, fixture: Path) -> str:
+    prefix = "Review token:"
+    tokens = [
+        line.split(prefix, 1)[1].strip()
+        for line in output.splitlines()
+        if prefix in line
+    ]
+    if len(tokens) != 1 or len(tokens[0]) != 64 or any(
+        character not in "0123456789abcdef" for character in tokens[0]
+    ):
+        raise BuildFailure(
+            f"zifsrepair did not emit one valid review token for '{fixture.name}'."
+        )
+    return tokens[0]
+
+
+def zifs_repair_tests(
+    root: Path,
+    build_root: Path,
+    source_image: Path,
+    environment: dict[str, str] | None,
+) -> None:
+    repair = build_root / "host" / "zifsrepair.exe"
+    inspector = build_root / "host" / "zifsinspect.exe"
+    fixture_directory = build_root / "tests" / "zifsrepair"
+    fixture_directory.mkdir(parents=True, exist_ok=True)
+
+    valid_fixture = fixture_directory / "valid.zifs"
+    shutil.copyfile(source_image, valid_fixture)
+    output = run_zifs_repair_command(
+        root,
+        repair,
+        ["plan", str(valid_fixture)],
+        valid_fixture,
+        0,
+        environment,
+        expect_mutation=False,
+    )
+    if "no repair is required" not in output:
+        raise BuildFailure("zifsrepair did not recognise a valid clean fixed point.")
+
+    unicode_path_fixture = fixture_directory / "Volumen ZiFS — reparación.zifs"
+    shutil.copyfile(source_image, unicode_path_fixture)
+    unicode_output = run_zifs_repair_command(
+        root,
+        repair,
+        ["plan", str(unicode_path_fixture)],
+        unicode_path_fixture,
+        0,
+        environment,
+        expect_mutation=False,
+    )
+    if "no repair is required" not in unicode_output:
+        raise BuildFailure("zifsrepair did not accept a valid UTF-16 host path.")
+
+    repairable_cases = (
+        ("primary-superblock", ("primary-superblock",), "Actions: 1"),
+        ("journal-header", ("journal-header",), "Actions: 1"),
+        ("unclean-mount", ("unclean-mount",), "Actions: 2"),
+        (
+            "combined",
+            ("unclean-mount", "primary-superblock", "journal-header"),
+            "Actions: 3",
+        ),
+    )
+    for case_name, mutations, expected_actions in repairable_cases:
+        fixture = fixture_directory / f"repairable-{case_name}.zifs"
+        shutil.copyfile(source_image, fixture)
+        for mutation in mutations:
+            mutate_zifs_inspection_fixture(fixture, mutation)
+        output = run_zifs_repair_command(
+            root,
+            repair,
+            ["plan", "--raw", str(fixture)],
+            fixture,
+            0,
+            environment,
+            expect_mutation=False,
+        )
+        if expected_actions not in output or "complete replacement overlay is valid" not in output:
+            raise BuildFailure(
+                f"zifsrepair omitted bounded plan evidence for '{fixture.name}'."
+            )
+        token = extract_zifs_repair_token(output, fixture)
+        wrong_token = "0" * 64 if token != "0" * 64 else "1" * 64
+        wrong_output = run_zifs_repair_command(
+            root,
+            repair,
+            ["apply", "--raw", str(fixture), wrong_token],
+            fixture,
+            2,
+            environment,
+            expect_mutation=False,
+        )
+        if "review token does not match" not in wrong_output:
+            raise BuildFailure(
+                f"zifsrepair did not explain token rejection for '{fixture.name}'."
+            )
+        apply_output = run_zifs_repair_command(
+            root,
+            repair,
+            ["apply", "--raw", str(fixture), token],
+            fixture,
+            0,
+            environment,
+            expect_mutation=True,
+        )
+        if "complete post-repair inspection found a valid clean volume" not in apply_output:
+            raise BuildFailure(
+                f"zifsrepair omitted post-apply evidence for '{fixture.name}'."
+            )
+        run_zifs_inspector_case(
+            root,
+            inspector,
+            fixture,
+            0,
+            ("Result: valid ZiFS metadata",),
+            environment,
+        )
+        fixed_output = run_zifs_repair_command(
+            root,
+            repair,
+            ["plan", "--raw", str(fixture)],
+            fixture,
+            0,
+            environment,
+            expect_mutation=False,
+        )
+        if "no repair is required" not in fixed_output:
+            raise BuildFailure(
+                f"zifsrepair did not reach a fixed point for '{fixture.name}'."
+            )
+
+    stale_fixture = fixture_directory / "stale-token.zifs"
+    shutil.copyfile(source_image, stale_fixture)
+    mutate_zifs_inspection_fixture(stale_fixture, "primary-superblock")
+    stale_output = run_zifs_repair_command(
+        root,
+        repair,
+        ["plan", "--raw", str(stale_fixture)],
+        stale_fixture,
+        0,
+        environment,
+        expect_mutation=False,
+    )
+    stale_token = extract_zifs_repair_token(stale_output, stale_fixture)
+    mutate_zifs_inspection_fixture(stale_fixture, "journal-header")
+    stale_hash = file_sha256(stale_fixture)
+    stale_apply_output = run_zifs_repair_command(
+        root,
+        repair,
+        ["apply", "--raw", str(stale_fixture), stale_token],
+        stale_fixture,
+        2,
+        environment,
+        expect_mutation=False,
+    )
+    if (
+        "review token does not match" not in stale_apply_output
+        or file_sha256(stale_fixture) != stale_hash
+    ):
+        raise BuildFailure("zifsrepair did not reject the stale reviewed plan safely.")
+
+    refused_cases = (
+        "security-record",
+        "journal-headers",
+        "allocation-leak",
+    )
+    for mutation in refused_cases:
+        fixture = fixture_directory / f"refused-{mutation}.zifs"
+        shutil.copyfile(source_image, fixture)
+        mutate_zifs_inspection_fixture(fixture, mutation)
+        refusal_output = run_zifs_repair_command(
+            root,
+            repair,
+            ["plan", "--raw", str(fixture)],
+            fixture,
+            1,
+            environment,
+            expect_mutation=False,
+        )
+        if "repair was refused" not in refusal_output:
+            raise BuildFailure(
+                f"zifsrepair did not explain refusal for '{fixture.name}'."
+            )
+    print(
+        "ZiFS repair CLI acceptance tests passed for clean ASCII and UTF-16 paths, four repairable, "
+        "one stale-plan, and three refused fixtures."
+    )
 
 
 def run_tests(root: Path, configuration: str, *, sanitised: bool = False) -> None:
@@ -2344,6 +2891,7 @@ def run_tests(root: Path, configuration: str, *, sanitised: bool = False) -> Non
         environment=test_environment,
     )
     zifs_inspector_tests(root, build_root, image_path, test_environment)
+    zifs_repair_tests(root, build_root, image_path, test_environment)
     manifests = sorted((root / "userland" / "services" / "manifests").glob("*.zsvc"))
     run(
         [str(build_root / "host" / "zsvccheck.exe"), *map(str, manifests)],

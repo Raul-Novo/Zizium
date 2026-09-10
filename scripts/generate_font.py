@@ -49,6 +49,7 @@ def generate(input_path: Path, output_path: Path) -> None:
         "// SPDX-License-Identifier: BSD-2-Clause",
         "",
         "#include <stdint.h>",
+        '#include "zi/font.h"',
         "",
         "const uint8_t k_zi_font_spleen_8x16[128][16] = {",
     ]

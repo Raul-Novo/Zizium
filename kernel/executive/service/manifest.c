@@ -184,20 +184,16 @@ ZiStatus zi_service_manifest_validate(const ZiServiceManifest* manifest) {
       !view_equals(manifest->identity, "NID:SYSTEM", sizeof "NID:SYSTEM" - 1u)) {
     return ZI_STATUS_INVALID_SERVICE_MANIFEST;
   }
-  if (manifest->token_policy == ZI_SERVICE_TOKEN_SERVICE &&
+  if (manifest->token_policy != ZI_SERVICE_TOKEN_SYSTEM &&
       (manifest->identity.size <= sizeof "NID:SERVICE:" - 1u ||
        zi_memory_compare(manifest->identity.data, "NID:SERVICE:", sizeof "NID:SERVICE:" - 1u) !=
            0)) {
     return ZI_STATUS_INVALID_SERVICE_MANIFEST;
   }
-  if (manifest->token_policy == ZI_SERVICE_TOKEN_SERVICE &&
+  if (manifest->token_policy != ZI_SERVICE_TOKEN_SYSTEM &&
       ZiFailed(validate_service_name(
           (ZiStringView){manifest->identity.data + sizeof "NID:SERVICE:" - 1u,
                          manifest->identity.size - (sizeof "NID:SERVICE:" - 1u)}))) {
-    return ZI_STATUS_INVALID_SERVICE_MANIFEST;
-  }
-  if (manifest->token_policy == ZI_SERVICE_TOKEN_SESSION_BOOTSTRAP &&
-      !view_equals(manifest->identity, "NID:SYSTEM", sizeof "NID:SYSTEM" - 1u)) {
     return ZI_STATUS_INVALID_SERVICE_MANIFEST;
   }
   return ZI_STATUS_SUCCESS;

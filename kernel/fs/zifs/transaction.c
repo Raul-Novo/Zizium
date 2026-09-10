@@ -139,6 +139,7 @@ static ZiStatus write_journal_record(const ZiFsTransaction* transaction,
                                      uint64_t record_index,
                                      const ZiFsJournalRecord* record);
 static ZiStatus write_transaction_superblocks(ZiFsTransaction* transaction, uint32_t state_flags);
+static uint32_t transaction_stable_superblock_state(const ZiFsVolume* volume);
 static uint32_t finalise_transaction_checksum(uint32_t checksum);
 
 ZiStatus ZiFsTransactionInitialise(ZiFsTransaction* transaction,
@@ -154,7 +155,10 @@ ZiStatus ZiFsTransactionInitialise(ZiFsTransaction* transaction,
       volume->device.read_blocks == NULL) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }
-  if (volume->superblock.state_flags != ZI_FS_SUPERBLOCK_STATE_NONE ||
+  if (volume->is_mounted == 0) {
+    return ZI_STATUS_INVALID_STATE;
+  }
+  if (volume->superblock.state_flags != transaction_stable_superblock_state(volume) ||
       volume->needs_recovery != 0) {
     return ZI_STATUS_RECOVERY_REQUIRED;
   }
@@ -183,6 +187,11 @@ ZiStatus ZiFsTransactionReset(ZiFsTransaction* transaction) {
       transaction->volume->needs_recovery != 0) {
     return ZI_STATUS_RECOVERY_REQUIRED;
   }
+  if (transaction->volume->is_mounted == 0 ||
+      transaction->volume->superblock.state_flags !=
+          transaction_stable_superblock_state(transaction->volume)) {
+    return ZI_STATUS_INVALID_STATE;
+  }
   transaction_discard_images(transaction);
   transaction->source_generation = transaction->volume->superblock.generation;
   if (transaction->source_generation == UINT64_MAX ||
@@ -194,7 +203,7 @@ ZiStatus ZiFsTransactionReset(ZiFsTransaction* transaction) {
   return ZI_STATUS_SUCCESS;
 }
 
-// Barriers enforce redo images, dirty marker, commit, home images, then clean marker.
+// Barriers enforce redo images, dirty marker, commit, home images, then stable mounted marker.
 // NOLINTNEXTLINE(readability-function-size, readability-function-cognitive-complexity)
 ZiStatus ZiFsTransactionCommit(ZiFsTransaction* transaction) {
   if (!transaction_is_valid(transaction)) {
@@ -202,6 +211,9 @@ ZiStatus ZiFsTransactionCommit(ZiFsTransaction* transaction) {
   }
   if (transaction->state != ZI_FS_TRANSACTION_STATE_PREPARED ||
       transaction->block_image_count == 0) {
+    return ZI_STATUS_INVALID_STATE;
+  }
+  if (transaction->volume->is_mounted == 0) {
     return ZI_STATUS_INVALID_STATE;
   }
   if (transaction->volume->is_read_only != 0 || transaction->volume->needs_recovery != 0 ||
@@ -296,7 +308,9 @@ ZiStatus ZiFsTransactionCommit(ZiFsTransaction* transaction) {
     goto commit_failed;
   }
 
-  status = write_transaction_superblocks(transaction, ZI_FS_SUPERBLOCK_STATE_DIRTY);
+  uint32_t stable_state = transaction_stable_superblock_state(transaction->volume);
+  status = write_transaction_superblocks(transaction,
+                                         stable_state | ZI_FS_SUPERBLOCK_STATE_TRANSACTION_DIRTY);
   if (ZiFailed(status)) {
     goto commit_failed;
   }
@@ -351,7 +365,7 @@ ZiStatus ZiFsTransactionCommit(ZiFsTransaction* transaction) {
     goto commit_failed;
   }
 
-  status = write_transaction_superblocks(transaction, ZI_FS_SUPERBLOCK_STATE_NONE);
+  status = write_transaction_superblocks(transaction, stable_state);
   if (ZiFailed(status)) {
     goto commit_failed;
   }
@@ -389,7 +403,7 @@ ZiStatus ZiFsTransactionCommit(ZiFsTransaction* transaction) {
 
   transaction->volume->superblock.generation = transaction->target_generation;
   transaction->volume->superblock.last_committed_transaction = transaction->transaction_id;
-  transaction->volume->superblock.state_flags = ZI_FS_SUPERBLOCK_STATE_NONE;
+  transaction->volume->superblock.state_flags = stable_state;
   transaction->volume->needs_recovery = 0;
   transaction->volume->journal_header_valid = 1;
   return ZiFsTransactionReset(transaction);
@@ -2275,6 +2289,14 @@ static ZiStatus write_transaction_superblocks(ZiFsTransaction* transaction, uint
     status = zi_block_barrier(&transaction->volume->device);
   }
   return status;
+}
+
+static uint32_t transaction_stable_superblock_state(const ZiFsVolume* volume) {
+  if ((volume->superblock.incompatible_features & ZI_FS_FEATURE_INCOMPAT_CLEAN_UNMOUNT_V1) != 0 &&
+      volume->is_read_only == 0) {
+    return ZI_FS_SUPERBLOCK_STATE_MOUNTED;
+  }
+  return ZI_FS_SUPERBLOCK_STATE_NONE;
 }
 
 static uint32_t finalise_transaction_checksum(uint32_t checksum) {

@@ -30,13 +30,17 @@
 #define ZI_FS_FEATURE_INCOMPAT_JOURNAL_V1 (UINT64_C(1) << 0)
 #define ZI_FS_FEATURE_INCOMPAT_SECURITY_V1 (UINT64_C(1) << 1)
 #define ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1 (UINT64_C(1) << 2)
+#define ZI_FS_FEATURE_INCOMPAT_CLEAN_UNMOUNT_V1 (UINT64_C(1) << 3)
 #define ZI_FS_FEATURE_INCOMPAT_SUPPORTED                                                           \
   (ZI_FS_FEATURE_INCOMPAT_JOURNAL_V1 | ZI_FS_FEATURE_INCOMPAT_SECURITY_V1 |                        \
-   ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1)
+   ZI_FS_FEATURE_INCOMPAT_DIRECTORY_EXTENTS_V1 | ZI_FS_FEATURE_INCOMPAT_CLEAN_UNMOUNT_V1)
 
 #define ZI_FS_SUPERBLOCK_STATE_NONE UINT32_C(0)
-#define ZI_FS_SUPERBLOCK_STATE_DIRTY (UINT32_C(1) << 0)
-#define ZI_FS_SUPERBLOCK_STATE_SUPPORTED ZI_FS_SUPERBLOCK_STATE_DIRTY
+#define ZI_FS_SUPERBLOCK_STATE_TRANSACTION_DIRTY (UINT32_C(1) << 0)
+#define ZI_FS_SUPERBLOCK_STATE_MOUNTED (UINT32_C(1) << 1)
+#define ZI_FS_SUPERBLOCK_STATE_DIRTY ZI_FS_SUPERBLOCK_STATE_TRANSACTION_DIRTY
+#define ZI_FS_SUPERBLOCK_STATE_SUPPORTED                                                           \
+  (ZI_FS_SUPERBLOCK_STATE_TRANSACTION_DIRTY | ZI_FS_SUPERBLOCK_STATE_MOUNTED)
 
 enum ZiFsFileType {
   ZI_FS_FILE_TYPE_REGULAR = 1,
@@ -114,6 +118,7 @@ typedef struct ZiFsVolume {
   uint32_t is_read_only;
   uint32_t needs_recovery;
   uint32_t journal_header_valid;
+  uint32_t is_mounted;
   uint64_t security_generation;
   uint32_t security_record_count;
 } ZiFsVolume;
@@ -162,6 +167,8 @@ ZiStatus ZiFsMountVolume(const ZiBlockDevice* device,
                          void* block_buffer,
                          size_t block_buffer_size,
                          ZiFsVolume* out_volume);
+ZiStatus ZiFsFlushVolume(ZiFsVolume* volume, void* block_buffer, size_t block_buffer_size);
+ZiStatus ZiFsUnmountVolume(ZiFsVolume* volume, void* block_buffer, size_t block_buffer_size);
 ZiStatus ZiFsReadFileRecord(const ZiFsVolume* volume,
                             uint64_t record_index,
                             void* block_buffer,

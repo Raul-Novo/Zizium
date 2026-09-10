@@ -6,6 +6,7 @@
 #include <stdio.h>
 
 #include "phase6_tests.h"
+#include "phase8_tests.h"
 #include "zi/block.h"
 #include "zi/byte_order.h"
 #include "zi/path.h"
@@ -29,7 +30,7 @@
 #define TEST_VOLUME_BLOCKS 16u
 #define TEST_DATA_BLOCK_ONE 7u
 #define TEST_DATA_BLOCK_TWO 9u
-#define TEST_SOURCE_ARENA_SIZE (3u * ZI_FS_BLOCK_SIZE)
+#define TEST_SOURCE_ARENA_SIZE ((size_t)3u * (size_t)ZI_FS_BLOCK_SIZE)
 
 typedef struct MemoryVolume {
   unsigned char* bytes;
@@ -54,6 +55,292 @@ static ZiStatus test_source_allocate(void* context, size_t size, void** out_allo
 static ZiStatus test_source_release(void* context, void* allocation);
 static bool initialise_file_volume(void);
 static bool initialise_security_table(void);
+
+typedef struct ImageAccessCase {
+  ZiAccessMask rights[4];
+  size_t request_count;
+  size_t expected_allocated_bytes;
+  ZiStatus expected;
+  uint32_t principal_authority;
+  uint32_t principal_value;
+  bool corrupt_root_directory;
+  bool corrupt_security;
+} ImageAccessCase;
+
+static bool initialise_image_access_volume(const ImageAccessCase* test_case);
+static bool run_image_access_case(const ImageAccessCase* test_case, size_t* out_assertion_count);
+
+static const ImageAccessCase k_image_access_cases[] = {
+    {{ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE},
+     2,
+     ZI_FS_BLOCK_SIZE + 18u,
+     ZI_STATUS_SUCCESS,
+     ZI_SECURITY_AUTHORITY_USER,
+     21,
+     false,
+     false},
+    {{0, ZI_ACCESS_EXECUTE, ZI_ACCESS_READ | ZI_ACCESS_EXECUTE, ZI_ACCESS_READ | ZI_ACCESS_EXECUTE},
+     1,
+     0,
+     ZI_STATUS_ACCESS_DENIED,
+     ZI_SECURITY_AUTHORITY_USER,
+     21,
+     false,
+     false},
+    {{ZI_ACCESS_LIST,
+      ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE},
+     1,
+     0,
+     ZI_STATUS_ACCESS_DENIED,
+     ZI_SECURITY_AUTHORITY_USER,
+     21,
+     false,
+     false},
+    {{ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_READ | ZI_ACCESS_LIST,
+      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE},
+     1,
+     0,
+     ZI_STATUS_ACCESS_DENIED,
+     ZI_SECURITY_AUTHORITY_USER,
+     21,
+     false,
+     false},
+    {{ZI_ACCESS_EXECUTE, ZI_ACCESS_EXECUTE, ZI_ACCESS_READ, ZI_ACCESS_READ | ZI_ACCESS_EXECUTE},
+     1,
+     0,
+     ZI_STATUS_ACCESS_DENIED,
+     ZI_SECURITY_AUTHORITY_USER,
+     21,
+     false,
+     false},
+    {{ZI_ACCESS_EXECUTE, ZI_ACCESS_EXECUTE, ZI_ACCESS_EXECUTE, ZI_ACCESS_READ | ZI_ACCESS_EXECUTE},
+     1,
+     0,
+     ZI_STATUS_ACCESS_DENIED,
+     ZI_SECURITY_AUTHORITY_USER,
+     21,
+     false,
+     false},
+    {{ZI_ACCESS_EXECUTE, ZI_ACCESS_EXECUTE, ZI_ACCESS_READ | ZI_ACCESS_EXECUTE, ZI_ACCESS_READ},
+     2,
+     ZI_FS_BLOCK_SIZE + 17u,
+     ZI_STATUS_ACCESS_DENIED,
+     ZI_SECURITY_AUTHORITY_USER,
+     21,
+     false,
+     false},
+    {{ZI_ACCESS_EXECUTE, ZI_ACCESS_EXECUTE, ZI_ACCESS_READ | ZI_ACCESS_EXECUTE, ZI_ACCESS_EXECUTE},
+     2,
+     ZI_FS_BLOCK_SIZE + 17u,
+     ZI_STATUS_ACCESS_DENIED,
+     ZI_SECURITY_AUTHORITY_USER,
+     21,
+     false,
+     false},
+    {{ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE},
+     1,
+     0,
+     ZI_STATUS_ACCESS_DENIED,
+     ZI_SECURITY_AUTHORITY_USER,
+     22,
+     false,
+     false},
+    {{ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE},
+     1,
+     0,
+     ZI_STATUS_ACCESS_DENIED,
+     ZI_SECURITY_AUTHORITY_SYSTEM,
+     1,
+     false,
+     false},
+    {{0, ZI_ACCESS_EXECUTE, ZI_ACCESS_READ | ZI_ACCESS_EXECUTE, ZI_ACCESS_READ | ZI_ACCESS_EXECUTE},
+     1,
+     0,
+     ZI_STATUS_ACCESS_DENIED,
+     ZI_SECURITY_AUTHORITY_USER,
+     21,
+     true,
+     false},
+    {{ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE,
+      ZI_ACCESS_READ | ZI_ACCESS_EXECUTE},
+     1,
+     0,
+     ZI_STATUS_CHECKSUM_MISMATCH,
+     ZI_SECURITY_AUTHORITY_USER,
+     21,
+     false,
+     true},
+};
+
+bool phase8_image_authorisation_test(size_t* out_assertion_count) {
+  if (out_assertion_count == NULL) {
+    return false;
+  }
+  *out_assertion_count = 0;
+  for (size_t index = 0; index < sizeof k_image_access_cases / sizeof k_image_access_cases[0];
+       ++index) {
+    size_t assertions = 0;
+    bool passed = run_image_access_case(&k_image_access_cases[index], &assertions);
+    *out_assertion_count += assertions;
+    if (!passed) {
+      (void)fprintf_s(stderr, "Image authorisation case %zu failed.\n", index);
+      return false;
+    }
+  }
+  return true;
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- linear fixture assertions and success cleanup are kept together.
+static bool run_image_access_case(const ImageAccessCase* test_case, size_t* out_assertion_count) {
+  size_t assertions = 0;
+  PHASE6_ASSERT(initialise_image_access_volume(test_case));
+  MemoryVolume memory = {&s_volume[0][0], sizeof s_volume};
+  ZiBlockDevice device = {sizeof device,
+                          ZI_BLOCK_DEVICE_VERSION,
+                          &memory,
+                          ZI_FS_BLOCK_SIZE,
+                          TEST_VOLUME_BLOCKS,
+                          memory_read_blocks,
+                          NULL,
+                          ZI_BLOCK_DEVICE_READ_ONLY,
+                          NULL};
+  unsigned char scratch[ZI_FS_BLOCK_SIZE] = {0};
+  ZiFsVolume volume = {0};
+  PHASE6_ASSERT(ZiFsMountVolume(&device, scratch, sizeof scratch, &volume) == ZI_STATUS_SUCCESS);
+  if (test_case->corrupt_root_directory) {
+    s_volume[5][100] ^= 1u;
+  }
+  if (test_case->corrupt_security) {
+    s_volume[4][ZI_FS_SECURITY_TABLE_HEADER_SIZE + 20u] ^= 1u;
+  }
+  TestSourceAllocator arena = {0};
+  const ZiFsImageSourceAllocator allocator = {sizeof allocator,
+                                              ZI_FS_IMAGE_SOURCE_ALLOCATOR_VERSION,
+                                              &arena,
+                                              TEST_SOURCE_ARENA_SIZE,
+                                              TEST_SOURCE_ARENA_SIZE,
+                                              test_source_allocate,
+                                              test_source_release};
+  const ZiAccessToken token = {sizeof token,
+                               ZI_ACCESS_TOKEN_VERSION,
+                               {test_case->principal_authority, test_case->principal_value},
+                               NULL,
+                               0,
+                               0};
+  ZiFsImageSourceAccess access = {sizeof access,
+                                  ZI_FS_IMAGE_SOURCE_ACCESS_VERSION,
+                                  &volume,
+                                  &token};
+  const ZiFsImageSourceRequest requests[] = {
+      {{"Seed.exe", sizeof "Seed.exe" - 1u},
+       {"C:\\Temp\\Seed File.txt", sizeof "C:\\Temp\\Seed File.txt" - 1u}},
+      {{"Other.dll", sizeof "Other.dll" - 1u},
+       {"C:\\Temp\\Other.dll", sizeof "C:\\Temp\\Other.dll" - 1u}},
+  };
+  ZiFsImageSourceSet sources = {0};
+  PHASE6_ASSERT(zi_zifs_image_source_set_load(&access,
+                                              requests,
+                                              test_case->request_count,
+                                              &allocator,
+                                              scratch,
+                                              sizeof scratch,
+                                              &sources) == test_case->expected);
+  PHASE6_ASSERT(arena.used == test_case->expected_allocated_bytes);
+  if (ZiSucceeded(test_case->expected)) {
+    PHASE6_ASSERT(sources.source_count == test_case->request_count);
+    PHASE6_ASSERT(zi_zifs_image_source_set_release(&allocator, &sources) == ZI_STATUS_SUCCESS);
+  }
+  PHASE6_ASSERT(arena.active_allocations == 0 && sources.version == 0);
+  sources.version = UINT32_MAX;
+  access.token = NULL;
+  PHASE6_ASSERT(zi_zifs_image_source_set_load(&access,
+                                              requests,
+                                              1,
+                                              &allocator,
+                                              scratch,
+                                              sizeof scratch,
+                                              &sources) == ZI_STATUS_INVALID_ARGUMENT);
+  PHASE6_ASSERT(sources.version == UINT32_MAX && arena.active_allocations == 0);
+  access.token = &token;
+  access.version = UINT32_MAX;
+  PHASE6_ASSERT(zi_zifs_image_source_set_load(&access,
+                                              requests,
+                                              1,
+                                              &allocator,
+                                              scratch,
+                                              sizeof scratch,
+                                              &sources) == ZI_STATUS_INVALID_ARGUMENT);
+  PHASE6_ASSERT(sources.version == UINT32_MAX && arena.active_allocations == 0);
+  *out_assertion_count = assertions;
+  return true;
+}
+
+static bool initialise_image_access_volume(const ImageAccessCase* test_case) {
+  if (!initialise_file_volume() ||
+      ZiFailed(ZiFsInitialiseSecurityTable(s_volume[4], ZI_FS_BLOCK_SIZE, 1))) {
+    return false;
+  }
+  const ZiSecurityId owner = {ZI_SECURITY_AUTHORITY_USER, 21};
+  const ZiSecurityId group = {ZI_SECURITY_AUTHORITY_GROUP, 2};
+  for (size_t index = 0; index < 4; ++index) {
+    const ZiAce ace = {ZI_ACE_ALLOW, 0, 0, test_case->rights[index], owner};
+    const ZiAcl acl = {sizeof acl, ZI_ACL_VERSION, &ace, test_case->rights[index] == 0 ? 0u : 1u};
+    const ZiSecurityDescriptor descriptor =
+        {sizeof descriptor, ZI_SECURITY_DESCRIPTOR_VERSION, owner, group, &acl, 0};
+    if (ZiFailed(ZiFsAppendSecurityDescriptor(s_volume[4],
+                                              ZI_FS_BLOCK_SIZE,
+                                              index + 1u,
+                                              ZI_FS_SECURITY_DESCRIPTOR_FLAG_DACL_PRESENT,
+                                              &descriptor))) {
+      return false;
+    }
+    ZiFsFileRecord record = {0};
+    size_t source_index = index;
+    if (index == 3) {
+      source_index = 2;
+    }
+    if (ZiFailed(ZiFsDecodeFileRecord(s_volume[1] + (source_index * ZI_FS_FILE_RECORD_SIZE),
+                                      ZI_FS_FILE_RECORD_SIZE,
+                                      &record))) {
+      return false;
+    }
+    record.security_id = index + 1u;
+    if (index == 3) {
+      record.file_id = 4;
+      record.file_size = 1;
+      record.allocated_size = ZI_FS_BLOCK_SIZE;
+      record.extent_count = 1;
+      record.extents[0] = (ZiFsExtent){0, 10, 1, 0, 0};
+      record.extents[1] = (ZiFsExtent){0};
+    }
+    if (ZiFailed(ZiFsEncodeFileRecord(&record,
+                                      s_volume[1] + (index * ZI_FS_FILE_RECORD_SIZE),
+                                      ZI_FS_FILE_RECORD_SIZE))) {
+      return false;
+    }
+  }
+  const ZiFsDirectoryEntry entry = {4,
+                                    3,
+                                    ZI_FS_FILE_TYPE_REGULAR,
+                                    0,
+                                    {"Other.dll", sizeof "Other.dll" - 1u}};
+  return ZiSucceeded(ZiFsAddDirectoryEntry(s_volume[6], ZI_FS_BLOCK_SIZE, &entry));
+}
 
 // The assertions intentionally keep every hostile extent case beside the successful read path.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity, readability-function-size)
@@ -220,7 +507,13 @@ bool phase6_zifs_file_test(size_t* out_assertion_count) {
       {file_path, sizeof file_path - 1u},
   };
   ZiFsImageSourceSet source_set = {0};
-  PHASE6_ASSERT(ZiSucceeded(zi_zifs_image_source_set_load(&volume,
+  const ZiAccessToken source_token =
+      {sizeof source_token, ZI_ACCESS_TOKEN_VERSION, {ZI_SECURITY_AUTHORITY_USER, 21}, NULL, 0, 0};
+  const ZiFsImageSourceAccess access = {sizeof access,
+                                        ZI_FS_IMAGE_SOURCE_ACCESS_VERSION,
+                                        &volume,
+                                        &source_token};
+  PHASE6_ASSERT(ZiSucceeded(zi_zifs_image_source_set_load(&access,
                                                           &request,
                                                           1,
                                                           &allocator,
@@ -240,7 +533,7 @@ bool phase6_zifs_file_test(size_t* out_assertion_count) {
 
   ZiFsImageSourceRequest wrong_case_request = request;
   wrong_case_request.file_path = (ZiStringView){wrong_case, sizeof wrong_case - 1u};
-  PHASE6_ASSERT(zi_zifs_image_source_set_load(&volume,
+  PHASE6_ASSERT(zi_zifs_image_source_set_load(&access,
                                               &wrong_case_request,
                                               1,
                                               &allocator,
@@ -250,7 +543,7 @@ bool phase6_zifs_file_test(size_t* out_assertion_count) {
                 source_allocator.active_allocations == 0);
 
   allocator.maximum_file_size = 128;
-  PHASE6_ASSERT(zi_zifs_image_source_set_load(&volume,
+  PHASE6_ASSERT(zi_zifs_image_source_set_load(&access,
                                               &request,
                                               1,
                                               &allocator,
@@ -261,7 +554,7 @@ bool phase6_zifs_file_test(size_t* out_assertion_count) {
   allocator.maximum_file_size = (size_t)2u * ZI_FS_BLOCK_SIZE;
 
   ZiFsImageSourceRequest duplicate_requests[2] = {request, request};
-  PHASE6_ASSERT(zi_zifs_image_source_set_load(&volume,
+  PHASE6_ASSERT(zi_zifs_image_source_set_load(&access,
                                               duplicate_requests,
                                               2,
                                               &allocator,
@@ -271,7 +564,7 @@ bool phase6_zifs_file_test(size_t* out_assertion_count) {
                 source_allocator.active_allocations == 0);
   duplicate_requests[1].module_name = (ZiStringView){"Other.dll", sizeof "Other.dll" - 1u};
   allocator.maximum_total_size = 6000;
-  PHASE6_ASSERT(zi_zifs_image_source_set_load(&volume,
+  PHASE6_ASSERT(zi_zifs_image_source_set_load(&access,
                                               duplicate_requests,
                                               2,
                                               &allocator,
@@ -283,7 +576,7 @@ bool phase6_zifs_file_test(size_t* out_assertion_count) {
 
   ZiFsImageSourceRequest invalid_request = request;
   invalid_request.module_name = (ZiStringView){"bad/name.dll", sizeof "bad/name.dll" - 1u};
-  PHASE6_ASSERT(zi_zifs_image_source_set_load(&volume,
+  PHASE6_ASSERT(zi_zifs_image_source_set_load(&access,
                                               &invalid_request,
                                               1,
                                               &allocator,
@@ -291,7 +584,7 @@ bool phase6_zifs_file_test(size_t* out_assertion_count) {
                                               sizeof scratch,
                                               &source_set) == ZI_STATUS_INVALID_ARGUMENT);
   source_allocator.fail_allocation = true;
-  PHASE6_ASSERT(zi_zifs_image_source_set_load(&volume,
+  PHASE6_ASSERT(zi_zifs_image_source_set_load(&access,
                                               &request,
                                               1,
                                               &allocator,

@@ -1,10 +1,15 @@
 # Zizium documentation index
 
-This index describes the current Zizium 0.2 "Luma" documentation set. Each subsystem
+This index describes the current Zizium 0.3 "ZiFS" documentation set. Each subsystem
 document separates implemented behaviour from scaffolded interfaces and future
-work. Phases 0–6 are complete; Phase 7's bounded writable ZiFS slice includes
-file growth and multi-block directories but remains active pending clean
-unmount and repair policy/tooling.
+work. Phases 0–7 are complete. Phase 7 includes bounded durable mutation,
+journalling, recovery, lifecycle handling, read-only inspection, and a separate
+fail-closed offline repair tool. Phase 8 durable identity and logon work is the
+current engineering focus.
+
+The latest prerequisite slice adds explicit restricted service launch policy
+and token-bound EXE/DLL/traversal access checks. See [services](services.md),
+[security](security.md) and [PE/COFF](pe_coff.md); this is not secure logon.
 
 ## Foundations
 
@@ -26,10 +31,12 @@ unmount and repair policy/tooling.
 - [Object manager](object_manager.md)
 - [Scheduler](scheduler.md)
 - [Security](security.md)
+- [Identity and credential threat model](identity_security.md)
 - [IPC](ipc.md)
 - [I/O manager](io_manager.md)
 - [Drivers](drivers.md)
 - [ZiFS](zifs.md)
+- [ZiFS offline repair](zifs_repair.md)
 - [Debugging](debugging.md)
 - [Logging](logging.md)
 

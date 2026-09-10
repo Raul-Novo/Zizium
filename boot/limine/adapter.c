@@ -13,6 +13,12 @@
 #pragma section(".limreq$b", read, write)
 #pragma section(".limreq$z", read, write)
 
+// Linker roots consumed by /include, rather than by another C translation unit.
+extern volatile uint64_t g_limine_requests_start_marker[4];
+extern volatile uint64_t g_limine_base_revision[3];
+extern volatile uint64_t g_limine_requests_end_marker[2];
+extern volatile void* volatile g_zk_relocation_anchor;
+
 // Limine discovery and /include linker roots require externally visible COFF symbols.
 // NOLINTBEGIN(misc-use-internal-linkage)
 __declspec(allocate(".limreq$a")) volatile uint64_t g_limine_requests_start_marker[4] =
@@ -20,19 +26,20 @@ __declspec(allocate(".limreq$a")) volatile uint64_t g_limine_requests_start_mark
 __declspec(allocate(".limreq$b")) volatile uint64_t g_limine_base_revision[3] =
     LIMINE_BASE_REVISION(6);
 
-__declspec(allocate(".limreq$b")) volatile struct limine_bootloader_info_request
+__declspec(allocate(".limreq$b")) static volatile struct limine_bootloader_info_request
     g_limine_bootloader_info_request = {LIMINE_BOOTLOADER_INFO_REQUEST_ID, 0, NULL};
-__declspec(allocate(".limreq$b")) volatile struct limine_executable_cmdline_request
+__declspec(allocate(".limreq$b")) static volatile struct limine_executable_cmdline_request
     g_limine_command_line_request = {LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID, 0, NULL};
-__declspec(allocate(".limreq$b")) volatile struct limine_memmap_request
+__declspec(allocate(".limreq$b")) static volatile struct limine_memmap_request
     g_limine_memory_map_request = {LIMINE_MEMMAP_REQUEST_ID, 0, NULL};
-__declspec(allocate(".limreq$b")) volatile struct limine_hhdm_request g_limine_hhdm_request = {
+__declspec(allocate(
+    ".limreq$b")) static volatile struct limine_hhdm_request g_limine_hhdm_request = {
     LIMINE_HHDM_REQUEST_ID,
     0,
     NULL,
 };
 __declspec(allocate(
-    ".limreq$b")) volatile struct limine_paging_mode_request g_limine_paging_mode_request = {
+    ".limreq$b")) static volatile struct limine_paging_mode_request g_limine_paging_mode_request = {
     LIMINE_PAGING_MODE_REQUEST_ID,
     0,
     NULL,
@@ -40,29 +47,31 @@ __declspec(allocate(
     LIMINE_PAGING_MODE_X86_64_4LVL,
     LIMINE_PAGING_MODE_X86_64_4LVL,
 };
-__declspec(allocate(".limreq$b")) volatile struct limine_executable_address_request
+__declspec(allocate(".limreq$b")) static volatile struct limine_executable_address_request
     g_limine_executable_address_request = {LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID, 0, NULL};
-__declspec(allocate(".limreq$b")) volatile struct limine_framebuffer_request
+__declspec(allocate(".limreq$b")) static volatile struct limine_framebuffer_request
     g_limine_framebuffer_request = {LIMINE_FRAMEBUFFER_REQUEST_ID, 1, NULL};
-__declspec(allocate(".limreq$b")) volatile struct limine_module_request g_limine_module_request = {
+__declspec(allocate(
+    ".limreq$b")) static volatile struct limine_module_request g_limine_module_request = {
     LIMINE_MODULE_REQUEST_ID,
     0,
     NULL,
     0,
     NULL,
 };
-__declspec(allocate(".limreq$b")) volatile struct limine_rsdp_request g_limine_rsdp_request = {
+__declspec(allocate(
+    ".limreq$b")) static volatile struct limine_rsdp_request g_limine_rsdp_request = {
     LIMINE_RSDP_REQUEST_ID,
     0,
     NULL,
 };
-__declspec(allocate(".limreq$b")) volatile struct limine_efi_system_table_request
+__declspec(allocate(".limreq$b")) static volatile struct limine_efi_system_table_request
     g_limine_efi_system_table_request = {LIMINE_EFI_SYSTEM_TABLE_REQUEST_ID, 0, NULL};
 
 __declspec(allocate(".limreq$z")) volatile uint64_t g_limine_requests_end_marker[2] =
     LIMINE_REQUESTS_END_MARKER;
 
-void* volatile g_zk_relocation_anchor = (void*)&g_zk_relocation_anchor;
+volatile void* volatile g_zk_relocation_anchor = (volatile void*)&g_zk_relocation_anchor;
 // NOLINTEND(misc-use-internal-linkage)
 
 static ZiBootMemoryRange g_memory_ranges[ZI_BOOT_MAX_MEMORY_RANGES];

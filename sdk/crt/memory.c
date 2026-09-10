@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#define ZI_BUILD_ZICRT 1
-
 #include <stddef.h>
 #include <string.h>
 

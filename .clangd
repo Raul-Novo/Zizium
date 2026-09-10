@@ -66,6 +66,7 @@ Diagnostics:
     Remove:
       - readability-magic-numbers
       - readability-identifier-length
+      - readability-uppercase-literal-suffix
       - modernize-use-trailing-return-type
       - modernize-use-nodiscard
 
