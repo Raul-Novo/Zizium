@@ -138,4 +138,4 @@ Zizium-owned work is licensed under GPL-3.0-or-later. Third-party notices are
 recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## AI ASSISTANCE NOTICE
-The documents are made using AI, but the code is made by hand
+The documents are made using AI, but the most of the code is made by hand
