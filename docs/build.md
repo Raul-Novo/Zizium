@@ -47,6 +47,34 @@ progress report before treating this migration as fully validated.
 
 ## Commands
 
+`make test` and `make sanitise` additionally format and independently inspect
+an eight-path private-storage fixture. Exact Security children use the private
+descriptor while prefix neighbours, different case and other directories keep
+the public template. The C inspector checks metadata/checksums and non-mutation;
+the independent wire assertions check the precise descriptor and assignments.
+Runtime ACL decisions are checked by the mandatory `ZIFS_PRIVATE_SECURITY`
+QEMU marker, not claimed from the Python wire assertions.
+
+The identity and access management host gates also exercise the bounded identity database/store,
+including real ZiFS commit/recovery through an injected block device, every
+issuance/deletion write/flush boundary and malformed checkpoint evidence.
+These are host storage tests, not proof of native database provisioning or logon.
+No additional dependency or diagnostic suppression is required by this code.
+
+`make identity-test` separately runs six persistent NVMe boots. It provisions
+an explicit disposable fixture, supplies independently obtained expected binding
+through the boot command line, checks denial markers and compares every database
+byte with expected host snapshots. Only the ESP changes between stages; the
+ZiFS partition persists. Each checkpoint is independently inspected without
+mutation. This proves native storage integration, not production enrolment or
+authentication. Run `make image` afterwards to restore normal generated images.
+
+On 2026-09-19 the current root Clang-Tidy configuration again lacked the two
+public naming exceptions. They were restored for the frozen ABI families.
+The separately present `-cert-err33-c` and `-readability-function-size`
+configuration exclusions were preserved, not introduced by this change.
+Reported analysis coverage reflects that current configuration.
+
 ```powershell
 make deps
 make
@@ -56,6 +84,7 @@ make run
 make boot-test
 make storage-test
 make zifs-test
+make identity-test
 make fault-test
 make release
 make analyse
@@ -142,6 +171,13 @@ kernel, native PE, import/static library, root-volume, and disk-image artefacts
 across consecutive builds without a difference.
 
 ## Scaffolded
+
+On 2026-09-16 the current root Clang-Tidy configuration lacked the mandated
+public naming exceptions and rejected existing ZiSucceeded/ZiFailed/ZkKernelMain
+functions and the assembly-linked ZkX64InterruptStubTable constant. The narrow
+FunctionIgnoredRegexp and GlobalConstantIgnoredRegexp entries now exempt only
+the Zi/Zx/Zk/ZiFs public families. Private names still follow the original rules.
+This resolves a real ABI/style conflict; it changes no compiler safety diagnostic.
 
 The Intel target is validation only and never becomes the default or a product
 claim. Cross-host support and reproducible signed release packaging need further

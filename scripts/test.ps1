@@ -6,7 +6,8 @@ param(
   [switch] $Boot,
   [switch] $Fault,
   [switch] $Storage,
-  [switch] $ZiFs
+  [switch] $ZiFs,
+  [switch] $Identity
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,8 +19,9 @@ if ($Boot) { ++$selectedModes }
 if ($Fault) { ++$selectedModes }
 if ($Storage) { ++$selectedModes }
 if ($ZiFs) { ++$selectedModes }
+if ($Identity) { ++$selectedModes }
 if ($selectedModes -gt 1) {
-  throw 'Choose only one of -Boot, -Fault, -Storage, or -ZiFs.'
+  throw 'Choose only one of -Boot, -Fault, -Storage, -ZiFs, or -Identity.'
 }
 $target = if ($Boot) {
   'boot-test'
@@ -29,6 +31,8 @@ $target = if ($Boot) {
   'storage-test'
 } elseif ($ZiFs) {
   'zifs-test'
+} elseif ($Identity) {
+  'identity-test'
 } else {
   'test'
 }

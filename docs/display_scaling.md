@@ -4,7 +4,7 @@ Display state is modelled as adapters, outputs, monitors, modes, framebuffers,
 scale factors, and render surfaces. Scale belongs to each output/monitor pair;
 there is no global zoom assumption.
 
-## Implemented in Seed
+## Implemented
 
 The integer-only heuristic returns a reduced rational factor:
 

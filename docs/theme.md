@@ -3,7 +3,7 @@
 Zizium's default identity is calm, modern, light, precise, friendly, and
 developer-oriented. It is not terminal-only as a long-term design.
 
-The frozen Seed palette is:
+The specified palette is:
 
 | Name | Value |
 | --- | --- |
@@ -17,7 +17,7 @@ The frozen Seed palette is:
 | `ZI_COLOUR_WARNING` | `#e6b864` |
 | `ZI_COLOUR_ERROR` | `#e66f6f` |
 
-## Implemented in Seed
+## Implemented
 
 Public `ZiColour` values and British-spelled constants are defined. The early
 framebuffer terminal uses the background, text, primary, muted, warning, and

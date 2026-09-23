@@ -5,7 +5,7 @@ device transitions. Planned operations include shutdown, restart, sleep,
 hibernate, battery state, lid actions, display sleep, CPU states, device states,
 and thermal policy.
 
-## Implemented in Seed
+## Implemented
 
 Only device power-state values and a versioned power-manager structure exist.
 QEMU termination is controlled by the host; the kernel has no shutdown path.

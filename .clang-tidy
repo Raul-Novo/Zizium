@@ -13,10 +13,12 @@ Checks: >
   readability-*,
   -bugprone-easily-swappable-parameters,
   -cert-dcl16-c,
+  -cert-err33-c,
   -clang-analyzer-alpha.*,
   -clang-analyzer-osx.*,
   -misc-no-recursion,
   -portability-avoid-pragma-once,
+  -readability-function-size,
   -readability-identifier-length,
   -readability-magic-numbers,
   -readability-uppercase-literal-suffix
@@ -31,6 +33,7 @@ CheckOptions:
   # Naming.
   readability-identifier-naming.DefaultCase: lower_case
   readability-identifier-naming.FunctionCase: lower_case
+  readability-identifier-naming.FunctionIgnoredRegexp: '^(Zi|Zx|Zk|ZiFs)[A-Z].*$'
   readability-identifier-naming.ParameterCase: lower_case
   readability-identifier-naming.VariableCase: lower_case
   readability-identifier-naming.LocalVariableCase: lower_case
@@ -48,6 +51,7 @@ CheckOptions:
   readability-identifier-naming.StaticConstantPrefix: k_
   readability-identifier-naming.GlobalConstantCase: lower_case
   readability-identifier-naming.GlobalConstantPrefix: k_
+  readability-identifier-naming.GlobalConstantIgnoredRegexp: '^(Zi|Zx|Zk|ZiFs)[A-Z].*$'
 
   # Umbrales de revisión, no límites arquitectónicos absolutos.
   readability-function-size.LineThreshold: '100'

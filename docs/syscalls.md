@@ -17,7 +17,7 @@ The dedicated x86-64 syscall ABI is distinct from the C ABI:
 The user wrapper moves Microsoft x64 argument one from RCX to R10 before the
 `SYSCALL` instruction. Calls requiring more than four scalar inputs will use a
 versioned, probed user structure; no untrusted stack argument is consumed by
-the Seed dispatcher.
+the current dispatcher.
 
 ## Number groups
 
@@ -33,12 +33,12 @@ the Seed dispatcher.
 - `0x0900`: debugging;
 - later groups: display, input, and networking.
 
-Named Seed reservations include `CloseHandle`, `WaitForObject`, `ExitProcess`,
+Named initial reservations include `CloseHandle`, `WaitForObject`, `ExitProcess`,
 `CreateProcess`, `CreateThread`, virtual-memory allocation and release, file
 create/read/write, device control, time query, access check, system-information
 query, and debug write. Reservation does not imply implementation.
 
-## Implemented in Seed
+## Implemented
 
 The bootstrap x64 process configures EFER.SCE, STAR, LSTAR, FMASK, GS base, and
 kernel GS base and verifies every MSR read-back before entering Ring 3.

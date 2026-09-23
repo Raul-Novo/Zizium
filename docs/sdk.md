@@ -12,7 +12,7 @@ C:\Zizium\SDK\examples
 C:\Zizium\SDK\docs
 ```
 
-## Implemented in Seed
+## Implemented
 
 The source tree contains public Zizium headers, minimal standard headers, ZiCRT
 and syscall assembly start-up objects, three C acceptance examples, and
@@ -27,14 +27,14 @@ images.
 
 The reserved tool suite is `zcc`, `zld`, `zasm`, `zdbg`, `zpkg`, `mkzifs`,
 `pecheck`, `zifsinspect`, `zifsrepair`, `symdump`, `zfmt`, `ztest`, and `zmake`.
-Only the named Seed host tools exist; `mkzifs`, `pecheck`, `zifsinspect`, and
+Only the named initial host tools exist; `mkzifs`, `pecheck`, `zifsinspect`, and
 `zifsrepair` perform substantive work, while ZCC remains a compiler-driver
 scaffold.
 
 ## Future
 
 Installed headers and libraries require ABI stability, version selection, and
-packaging rules. The Seed loader handles only a bounded core dependency graph;
+packaging rules. The current loader handles only a bounded core dependency graph;
 general SDK deployment and library discovery are absent. Debugging, symbols,
 assembly, packages, formatting, testing, and native build orchestration remain
 future work.

@@ -4,7 +4,7 @@ The early boot font must visibly distinguish uppercase `I`, lowercase `l`,
 digit `1`, uppercase `O`, and digit `0`. Missing glyphs render a replacement
 symbol rather than silently becoming another character.
 
-## Implemented in Seed
+## Implemented
 
 The build generates an embedded 8×16 bitmap table from Spleen 2.2.0 under its
 BSD-2-Clause licence. The terminal renders scaled bitmap pixels, uses a

@@ -196,6 +196,7 @@ static ZiStatus query_file_size(const char* path, uint64_t* out_size);
 static ZiStatus write_input_file(FILE* volume, const InputFile* input_file);
 static ZiStatus write_at_block(FILE* file, uint64_t block_number, const void* block);
 static ZiStatus initialise_default_security_table(void* block, size_t block_size);
+static uint64_t initial_security_id(const char* path, size_t path_size);
 static ZiStatus mark_extent(unsigned char* allocation_bitmap,
                             size_t allocation_bitmap_size,
                             uint64_t first_block,
@@ -362,7 +363,7 @@ static int format_volume(const char* path,
         DirectoryNode* node = &nodes[node_index];
         record.file_id = node->file_id;
         record.parent_file_id = nodes[node->parent_index].file_id;
-        record.security_id = 1;
+        record.security_id = initial_security_id(node->path, node->path_size);
         record.directory_block = node->directory_block;
         record.file_type = ZI_FS_FILE_TYPE_DIRECTORY;
         if (node->continuation_block_count != 0) {
@@ -376,7 +377,8 @@ static int format_volume(const char* path,
         InputFile* input_file = &input_files[node_index - node_count];
         record.file_id = input_file->file_id;
         record.parent_file_id = nodes[input_file->parent_index].file_id;
-        record.security_id = 1;
+        record.security_id =
+            initial_security_id(input_file->relative_path, input_file->relative_path_size);
         record.file_type = ZI_FS_FILE_TYPE_REGULAR;
         record.file_size = input_file->file_size;
         record.allocated_size = input_file->data_block_count * ZI_FS_BLOCK_SIZE;
@@ -921,6 +923,21 @@ static ZiStatus write_at_block(FILE* file, uint64_t block_number, const void* bl
   return ZI_STATUS_SUCCESS;
 }
 
+// Formatter placement policy, not a runtime path-based authorisation bypass or inheritance engine.
+static uint64_t initial_security_id(const char* path, size_t path_size) {
+  const char private_root[] = "Zizium\\Security";
+  const size_t private_size = sizeof private_root - 1u;
+  if (path_size < private_size) {
+    return 1;
+  }
+  for (size_t index = 0; index < private_size; ++index) {
+    if (path[index] != private_root[index]) {
+      return 1;
+    }
+  }
+  return path_size == private_size || path[private_size] == '\\' ? 2 : 1;
+}
+
 static ZiStatus initialise_default_security_table(void* block, size_t block_size) {
   const ZiSecurityId system = {ZI_SECURITY_AUTHORITY_SYSTEM, 1};
   const ZiSecurityId administrators = {ZI_SECURITY_AUTHORITY_GROUP, 1};
@@ -947,11 +964,29 @@ static ZiStatus initialise_default_security_table(void* block, size_t block_size
   if (ZiFailed(status)) {
     return status;
   }
+  status = ZiFsAppendSecurityDescriptor(block,
+                                        block_size,
+                                        1,
+                                        ZI_FS_SECURITY_DESCRIPTOR_FLAG_DACL_PRESENT,
+                                        &descriptor);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  const ZiAce private_entry = {ZI_ACE_ALLOW, 0, 0, ZI_ACCESS_FULL_CONTROL, system};
+  const ZiAcl private_dacl = {sizeof(ZiAcl), ZI_ACL_VERSION, &private_entry, 1};
+  const ZiSecurityDescriptor private_descriptor = {
+      sizeof(ZiSecurityDescriptor),
+      ZI_SECURITY_DESCRIPTOR_VERSION,
+      system,
+      administrators,
+      &private_dacl,
+      ZI_SECURITY_DESCRIPTOR_CONTROL_NONE,
+  };
   return ZiFsAppendSecurityDescriptor(block,
                                       block_size,
-                                      1,
+                                      2,
                                       ZI_FS_SECURITY_DESCRIPTOR_FLAG_DACL_PRESENT,
-                                      &descriptor);
+                                      &private_descriptor);
 }
 
 static ZiStatus mark_extent(unsigned char* allocation_bitmap,

@@ -1,6 +1,6 @@
 # x64 application binary interface
 
-## Implemented in Seed
+## Implemented
 
 Zizium x64 C code uses the Microsoft x64 ABI to match PE/COFF tooling.
 
@@ -36,7 +36,7 @@ before Ring-3 entry.
 The initial DLL boundary is also Microsoft x64. The build and QEMU gates prove
 calls through `zx.dll`, `zicrt.dll`, and `zia.dll`, including import-address
 table resolution and ordinary non-volatile-register rules. Public DLL ABI
-versioning beyond the current symbol set is not frozen by Seed.
+versioning beyond the current symbol set is not frozen by this implementation.
 
 The architecture interrupt boundary is separately frozen inside the kernel.
 Generated stubs normalise vector/error-code entry, preserve all general
@@ -68,7 +68,7 @@ restricted, interrupt-enabled RFLAGS state before `SYSRETQ` is permitted.
 ## Scaffolded
 
 Thread-local state and user exception-delivery records are scaffolded only.
-Luma executes in the bounded Phase 6 user-session path and RuntimeHost proves
+Luma executes in the bounded user-session path and RuntimeHost proves
 its entry symbol and core DLL imports link, but RuntimeHost is not executed.
 Driver PE artefacts remain unloaded placeholders. Concurrent user-thread ABI
 details are not defined; the current process wait is synchronous and bounded.

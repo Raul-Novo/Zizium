@@ -4,7 +4,7 @@ Zin is the future Zizium language, ZinRT its language runtime, and RuntimeHost
 the broker for runtime lifecycle and policy. They must use native objects,
 security, IPC, and PE integration rather than importing POSIX assumptions.
 
-## Implemented in Seed
+## Implemented
 
 `RuntimeHost.exe` is a PE placeholder that links through the current ZiCRT and
 core DLL start-up model. The kernel proves that image/import/start-up class with

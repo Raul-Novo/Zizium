@@ -9,7 +9,7 @@ are Initialised, Ready, Running, Waiting, Transition, and Terminated. Policy
 classes reserve Realtime, High, AboveNormal, Normal, BelowNormal, Background,
 and Idle.
 
-## Implemented in Seed
+## Implemented
 
 `ZxScheduler` owns 32 FIFO ready queues and a 32-bit ready bitmap. Enqueue and
 remove validate state, queue membership, priority, and affinity. Selection
@@ -60,7 +60,7 @@ Mutex contention invokes a priority-inheritance hook. A dynamic-priority owner
 temporarily inherits the highest waiter priority, clamped below the realtime
 band, while preserving ready-queue membership. Release restores the base
 priority and transfers ownership through the ordinary wait completion path.
-This Seed policy is deliberately limited to one mutex's current waiter set; a
+This initial policy is deliberately limited to one mutex's current waiter set; a
 future ownership graph must aggregate multiple held mutexes and chained
 dependencies.
 
@@ -81,10 +81,10 @@ general process stack manager.
 
 ## Future
 
-Phase 5 connects dispatcher completion to real I/O requests and device
-timeouts. Later work adds a timer wheel, scheduled concurrent user threads,
+General runtime integration must connect dispatcher completion to I/O requests
+and device timeouts. Later work adds a timer wheel, scheduled concurrent user threads,
 wait syscalls, process address-space switching, and general stack policy.
-Phase 16 owns per-CPU state, scalable SMP locks, processor groups, cross-CPU
+Planned SMP work covers per-CPU state, scalable locks, processor groups, cross-CPU
 rescheduling, affinity migration, chained priority inheritance, I/O-driven
 dynamic boosts, realtime admission, load balancing, and CPU hotplug. The
 current proof is a safe uniprocessor vertical slice, not a complete NT-class

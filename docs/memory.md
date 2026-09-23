@@ -2,8 +2,8 @@
 
 ## Scope
 
-This document records the Phase 2 kernel-memory contract, the verified Phase 3
-user-process extension, and the Phase 5 MMIO/DMA boundary. The current code
+This document defines the kernel-memory contract, the verified user-process
+extension, and the MMIO/DMA boundary. The current code
 owns and accounts for physical pages, installs four-level kernel and process
 page tables, enforces page protections, provides bounded kernel stacks and
 allocation pools, and can
@@ -94,7 +94,7 @@ The local APIC has a dedicated uncached page. A separate single-page temporary
 window has exclusive map/unmap state and is verified by writing through it and
 reading the same owned physical page through the HHDM.
 
-Phase 5 adds a bounded uncached MMIO arena at `0xffffe10000000000`. It contains
+Hardware and storage adds a bounded uncached MMIO arena at `0xffffe10000000000`. It contains
 64 independent 2 MiB slots, maps only validated physical ranges, rejects
 overflow and executable device mappings, and releases slots after unmapping.
 PCIe ECAM uses one temporary 1 MiB bus mapping at a time; the NVMe controller
@@ -110,7 +110,7 @@ quarantines pages rather than returning memory that the device may still own.
 
 ### Current kernel virtual regions
 
-These fixed regions are Phase 2 policy, not a complete kernel virtual-address
+These fixed regions are kernel memory policy, not a complete kernel virtual-address
 allocator:
 
 | Virtual base | Current use |
@@ -126,7 +126,7 @@ allocator:
 The Limine-provided HHDM base is kept in `ZiBootContext` and used for physical
 page-table and allocation access.
 
-### Seed process address space
+### Process address space
 
 The 48-bit virtual-address policy is now frozen for the initial x64 process
 slice:

@@ -31,7 +31,7 @@ kernel continues through pre-emption to Luma.
 
 Phase 4 is complete. The executive has locked object-type registration,
 bounded exact-case namespace directories, single-destruction lifetime rules,
-and private generation-safe handle tables for every Seed process. ACL checks
+and private generation-safe handle tables for every initial process. ACL checks
 occur on open and target-process duplication; lookup enforces granted masks and
 exact types.
 
@@ -138,8 +138,8 @@ namespace, file-data, and allocation state after every restart. A successful
 27-image transaction proves all 24 create data blocks. Separate exhaustive
 campaigns fail every write-growth operation and every operation in the first
 directory expansion, requiring exactly the old or new size/content, path,
-extent, allocation, and generation state after recovery. Host acceptance is
-now 36 groups and 3,079 assertions. `make zifs-test` proves clean unmount and
+extent, allocation, and generation state after recovery. Host acceptance at
+that checkpoint was 36 groups and 3,079 assertions. `make zifs-test` proves clean unmount and
 reboot, interrupted-unmount diagnosis and recovery, clean create,
 write growth, multi-block directory persistence, rename/move, truncate/delete,
 both crash outcomes, slot-31-to-slot-0 wrap, post-wrap persistence, and
@@ -203,52 +203,56 @@ lists are in `ZIZIUM_PROGRESS.md`. Detailed contracts are in `memory.md`,
   remain live. Phase 7 durable-mutation, recovery, lifecycle, inspection,
   repair, and security-corruption evidence must remain live.
 
+## Current security checkpoint
+
+The disabled-record identity database and ZiFS store have passed host crash
+tests and six dedicated NVMe persistence boots. The native test obtains its
+expected binding from trusted host provisioning before guest execution,
+preserves the ZiFS partition between stages and verifies complete independent
+byte snapshots. It proves issuance, tombstone deletion, same-name non-reuse,
+wrong-binding denial and non-SYSTEM denial. It does not install a production
+database, accept credentials or authenticate the bootstrap session.
+
+The current host suite has 42 groups and 4,500 counted assertions. Keep the
+39-boundary issuance/deletion crash campaigns, malformed-checkpoint rejection
+tests and full old/new byte comparisons. The ZiFS recovery correction accepts
+a durable CHECKPOINT only with validated redo and matching COMMIT evidence.
+See the latest progress report for complete command results and remaining work.
+
 ## Exact next task
 
-The strict compiler, analysis, AddressSanitizer and boot/durability regression
-gates for the first Phase 8 prerequisite corrections passed on 2026-09-08:
-36 host groups, 3,079 assertions, all 32 ZiFS boots, matching 21 release
-artefacts across two builds, and optional Intel validation. Use the latest
-progress report for commands and limitations. The build/test wrappers load
-the installed x64 Visual Studio environment automatically when required.
+Continue the active identity and access-management work in this dependency order:
 
-The subsequent launch prerequisite now removes bootstrap Administrators grants,
-resolves approved service policies to explicit reserved identities, and enforces
-Execute traversal plus Read/Execute on each EXE/DLL under its own launch token.
-SessionHost declares NID:SERVICE:SessionHost and uses SERVICE:3; LogHost/MountHost
-reserve SERVICE:1/2. SYSTEM is reserved for the two approved hand-off programmes.
-Never treat these bootstrap pairs as authenticated local users or migrate old
-hash IDs implicitly. Rebuild old SessionBootstrap manifests/images.
+1. Implement a production provisioning boundary with a separately trusted
+   issuer/volume/database/file binding. Define fresh installation, explicit
+   recovery and clone behaviour before accepting existing state. Never infer
+   authority from the database under test or reuse deterministic fixture UUIDs.
+2. Provide reviewed entropy and secret-buffer lifecycle prerequisites. Salt and
+   issuer generation must fail when secure randomness is unavailable. Do not
+   accept passwords over serial, command arguments, history or scrollback.
+3. Select and pin a maintained memory-hard password implementation after
+   verifying its licence, provenance, native adapters and resource limits.
+   The existing dependency evaluation is not an approved cryptographic port.
+4. Implement disabled/resumable profile provisioning, journalled private
+   descriptors and default inheritance, then credential-verified token creation.
+   Test two-user isolation, crash recovery and non-reuse before elevation.
+5. Complete revocation, protected broker IPC, checked privileges, audit and
+   consent-bound elevation before marking the security milestone complete.
 
-The new host regressions cover the verified old-hash collision, policy substitution,
-directory/image access distinctions, missing tokens, policy corruption and source
-rollback. Boot requires SERVICE_POLICY_DENIED and IMAGE_ACCESS_DENIED alongside
-all old markers. Consult the latest progress report for completed gate evidence.
-The completed launch-boundary gates on 2026-09-08 report 38 host groups and
-3,285 assertions, analysis, AddressSanitizer, all fault/storage and 32 serial
-ZiFS boots, optional Intel validation and 21 matching release artefacts.
-Token storage and volume state must stay stable during the synchronous lookup/read;
-concurrent file/security changes still need a locking/revocation contract.
+Read identity_database.md, identity_security.md, accounts.md, security.md and
+the roadmap before changing those boundaries. Existing eight-byte ACL IDs and
+reserved bootstrap pairs are not automatically migrated or authenticated.
+Preserve default deny and no implicit SYSTEM/administrator bypass.
 
-Credentials, durable identities and ACL propagation remain unimplemented.
-Continue in this dependency order:
+## Verification and documentation
 
-1. Refine the existing `identity_security.md` threat model alongside concrete
-   credentials, database updates, token construction, inheritance, and audit APIs.
-2. Freeze a bounded, versioned NID and identity-database format with checksum,
-   transaction, rollback, and recovery rules on ZiFS.
-3. Select a maintained, reviewed memory-hard password-hashing implementation
-   compatible with the project's licence and freestanding/user-mode boundary;
-   do not invent cryptography.
-4. Implement two local users and groups, logon-derived tokens, persistent
-   ownership/default ACL inheritance, and adversarial isolation tests before
-   adding elevation.
+Retain every existing architecture, memory, executive, storage, service,
+session and ZiFS acceptance marker. Run the full gates plus identity-test for
+identity-store changes; restore the normal image with make image afterwards.
+Normal images must remain credential-free until explicit provisioning exists.
 
-Preserve default deny, exact-case identities and paths, no implicit SYSTEM or
-administrator bypass, and all Phase 7 durability and corruption gates.
-
-## Later sequence
-
-After the first Phase 8 identity/database slice: implement logon, ACL
-inheritance, auditable privilege use, restricted service identities, and
-explicit elevation before expanding user-facing administration.
+Use version numbers and subsystem names in current reference documentation.
+Retain literal paths, commands, ABI names and test markers. Historical reports
+preserve their original evidence; numbered roadmap items track dependencies,
+not release branding. Update all affected READMEs/contracts, then the progress
+report last. The full daily-use operating-system goal remains incomplete.

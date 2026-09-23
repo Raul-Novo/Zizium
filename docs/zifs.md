@@ -59,7 +59,7 @@ identifies the version-one durable security-table contract, and bit 2
 continuation contract below. Bit 3
 (`ZI_FS_FEATURE_INCOMPAT_CLEAN_UNMOUNT_V1`) identifies the explicit mounted and
 cleanly-unmounted state machine. All four bits are required by newly formatted
-Seed volumes. All metadata regions must fit, must not overlap, and must exclude
+initial volumes. All metadata regions must fit, must not overlap, and must exclude
 both superblocks.
 
 With clean-unmount feature bit 3 present, the supported states are:
@@ -151,12 +151,18 @@ strict record-ID ordering, zeroed spare records, and every nonempty file
 record's security reference before making the volume available. Missing or
 unknown references fail closed.
 
-`mkzifs.exe` currently emits descriptor ID 1 for every formatted file record.
+`mkzifs.exe` emits descriptor ID 1 for public formatted file records.
 Its ordered DACL denies Guests mutation rights, grants SYSTEM and
 Administrators full control, and grants Users Read, Execute, and List. There is
 no implicit administrator bypass in the evaluator. Inheritance flags are
-stored and validated, but applying inherited ACLs during creation is Phase 8
-work.
+stored and validated, but applying inherited ACLs during creation is identity and access management
+work. Descriptor ID 2 is assigned to the exact `Zizium\Security` relative
+path and descendants at formatting time. Its only ACE grants SYSTEM:1
+FullControl; owner is SYSTEM:1 and primary group is Administrators without
+an associated grant. Prefix neighbours and differently cased names do not
+receive this template. Imported child files receive ID 2 independently of
+directory traversal protection. This does not migrate existing volumes or
+implement runtime inheritance; see [security.md](security.md).
 
 The current no-replacement rename/move transaction accepts exact source and
 target names plus indexed parent records. An already-present exact target, or
@@ -271,8 +277,8 @@ home-block image. Record types are `BEGIN`, `BLOCK_IMAGE`, `COMMIT`, and
 | 32 | 8 | target home block, or all-ones for non-image records |
 | 40 | 8 | source generation |
 | 48 | 8 | target generation |
-| 56 | 4 | expected image count for `BEGIN` |
-| 60 | 4 | transaction checksum for `COMMIT` |
+| 56 | 4 | expected image count for `BEGIN`, `COMMIT`, and `CHECKPOINT` |
+| 60 | 4 | transaction checksum for `COMMIT` and `CHECKPOINT` |
 | 64 | 4 | payload CRC32C |
 | 124 | 4 | record-header and payload CRC32C |
 | 128 | up to 4096 | complete target-block image |
@@ -312,6 +318,17 @@ at that cursor and may wrap. This is bounded single-writer reclamation; there
 is no concurrent writer, retained multi-transaction history, or background
 checkpoint worker.
 
+Recovery also accepts a durable `CHECKPOINT` when publication of the final
+empty journal header was interrupted. It must follow the validated `COMMIT`
+immediately and agree with the complete redo set's image count and transaction
+checksum. Duplicate checkpoints, a missing commit, wrong counts, sequences or
+digests fail before writes. The validated redo set can be replayed idempotently;
+the checkpoint alone never authorises recovery. This prerequisite correction
+was exposed by the identity and access management nine-block database write fault campaign on a
+clean-unmount-feature volume. The earlier recovery scanner rejected this valid
+crash window. Host tests now cover it and six recomputed-checksum malformed
+variants; consult the progress report for wider regression gate results.
+
 ## Mount, flush, and clean-unmount ordering
 
 A newly formatted feature-bit-3 volume is cleanly unmounted. Read-only mounts
@@ -343,7 +360,7 @@ unmounted volume; a subsequent writable mount must activate it explicitly.
 - `mkzifs.exe` creates deterministic 8–2048 MiB volumes, 75 required
   directories, optional bounded host files, scalable allocation maps,
   multi-block directory continuation extents where needed, both superblocks,
-  both valid journal headers, and the version-one default security descriptor.
+  both valid journal headers, and version-one public/private security descriptors.
 - The kernel mounts primary or backup metadata through a checked
   `ZiBlockDevice`, validates redundant state, reads files, and performs
   exact-case path lookup. Mount also validates the complete security table and

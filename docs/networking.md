@@ -5,7 +5,7 @@ Ethernet, Wi-Fi, IPv4, IPv6, TCP, UDP, DNS, DHCP, TLS, firewall policy, and
 network profiles. A BSD sockets compatibility layer may be added later but is
 not the native design.
 
-## Implemented in Seed
+## Implemented
 
 No networking protocol or network driver is implemented. The service and
 driver architectures merely reserve appropriate integration points.

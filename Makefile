@@ -58,5 +58,9 @@ zifs-test:
 intel:
 	$(POWERSHELL) -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Configuration $(CONFIGURATION) -Target intel
 
+.PHONY: identity-test
+identity-test:
+	$(POWERSHELL) -NoProfile -ExecutionPolicy Bypass -File scripts/test.ps1 -Configuration $(CONFIGURATION) -Identity
+
 help:
 	@$(POWERSHELL) -NoProfile -Command "Get-Content README.md | Select-Object -First 45"

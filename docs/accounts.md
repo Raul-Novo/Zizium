@@ -4,7 +4,7 @@ The account model will provide local users, groups, guests, service identities,
 profile creation, logon sessions, lock state, and explicit administrative
 elevation. ACL templates define access to each profile and shared directory.
 
-## Implemented in Seed
+## Implemented
 
 Security IDs, token user/group membership, ordered ACL checks, and service
 identity strings are implemented. SessionHost and Luma form a real but trusted
@@ -17,6 +17,19 @@ demonstration Luma principal, both with Users membership only. Their executable
 and DLL loads require directory traversal and Read/Execute ACL grants. These
 are restricted boot fixtures, not issued durable accounts or secure logon.
 
+The native-identity prerequisite provides a versioned 32-byte issuer-bound
+codec, explicit single-issuer resolution and an unpublished high-water candidate
+reservation. Dynamic GROUP/USER/SERVICE values start at 256, outside reserved
+bootstrap values. The database wrapper commits state and disabled
+records in one ZiFS transaction before issuance and retains deletion tombstones.
+It validates separately supplied binding and actual private policy; no credential
+or token is produced. Six dedicated NVMe boots verify persistence and denials;
+normal boot does not load an account database. See
+[identity.md](identity.md) and [identity_database.md](identity_database.md).
+New formatted images protect the Security directory and imported children with
+an explicit SYSTEM:1-only descriptor. This does not yet provision an identity
+database or private user profiles and does not enable authentication.
+
 ## Scaffolded
 
 The default ZiFS hierarchy contains `C:\Users\Default`, `C:\Users\Public`, and
@@ -24,9 +37,9 @@ the standard profile subdirectories. Identity names reserve SYSTEM,
 ADMINISTRATORS, USERS, GUESTS, SERVICE, and USER forms. SessionHost and
 SecurityHost manifests define ownership boundaries.
 
-## Active Phase 8 work
+## Active identity and access management work
 
-Phase 8 begins with a threat model and a bounded, versioned, checksummed,
+Identity and access management begins with a threat model and a bounded, versioned, checksummed,
 transactional identity database on ZiFS. It must freeze durable NIDs, construct
 tokens only after credential verification, create two isolated local profiles,
 and apply persistent ownership and default ACL inheritance. A maintained,
@@ -35,7 +48,7 @@ boundary; Zizium will not invent password cryptography.
 
 ## Future
 
-Identity database, password hashing and policy, PIN support, logon UI, secure
+Production database provisioning, password hashing and policy, PIN support, logon UI, secure
 credential input, token creation, profile copying, lock/unlock, guest policy,
 service logon, account recovery, auditing, and a consent-based elevation flow
 are unimplemented.

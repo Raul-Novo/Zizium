@@ -2,7 +2,13 @@
 
 ## Scope
 
-Zizium 0.3 “ZiFS” is an x86-64, UEFI-first, PE/COFF-native operating-system
+New ZiFS images provision a SYSTEM:1-only Security subtree using stored ACL
+policy, not a path-based privilege bypass. The database/store commits disabled
+records with high-water state and passes host and native persistence tests.
+Production issuance, credentials and dynamic inheritance remain absent. See
+[the database contract](identity_database.md) for the current boundary.
+
+Zizium 0.3 is an x86-64, UEFI-first, PE/COFF-native operating-system
 foundation. It is non-POSIX by design. Its kernel is modular monolithic: core
 executive, memory, I/O, filesystem, security, and loader components share one
 privileged address space, while their interfaces remain separately owned and
@@ -24,7 +30,7 @@ FAT32 is permitted only on the firmware-required EFI System Partition. Native
 paths use drive letters and backslashes, preserve spaces, and compare validated
 UTF-8 byte sequences exactly.
 
-Phase 8 prerequisite work enforces token role/count limits and inheritance-only
+Identity and access management prerequisite work enforces token role/count limits and inheritance-only
 ACE filtering, explicit bootstrap service launch policy, restricted memberships,
 and directory/EXE/DLL authorisation under the launch token. The
 [security contract](security.md) records remaining identity, authentication and
@@ -32,7 +38,11 @@ concurrent authorisation requirements; this is not yet a
 secure multi-user platform. All compilation paths inherit the strict warning
 policy described in [build.md](build.md).
 
-## Implemented in Seed
+The separate issuer-bound native-identity codec and candidate reservation are
+verified prerequisites used by the disabled-record database. They do not alter
+existing ZiFS ACL IDs or the current process-token ABI, and are not logon.
+
+## Implemented
 
 - A relocatable, import-free AMD64 PE32+ kernel and Limine revision-six boot
   adapter.

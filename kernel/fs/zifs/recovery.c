@@ -24,13 +24,18 @@ typedef struct RecoveryScan {
   uint64_t target_generation;
   uint64_t begin_sequence;
   uint64_t commit_sequence;
+  uint64_t checkpoint_sequence;
   uint64_t maximum_sequence;
   uint64_t maximum_sequence_record;
   uint32_t expected_image_count;
   uint32_t image_count;
   uint32_t commit_checksum;
+  uint32_t commit_image_count;
+  uint32_t checkpoint_checksum;
+  uint32_t checkpoint_image_count;
   bool found_begin;
   bool found_commit;
+  bool found_checkpoint;
   RecoveryImage images[ZI_FS_RECOVERY_MAXIMUM_IMAGES];
 } RecoveryScan;
 
@@ -330,8 +335,15 @@ static ZiStatus accumulate_recovery_record(const ZiFsSuperblock* superblock,
     scan->found_commit = true;
     scan->commit_sequence = record->sequence;
     scan->commit_checksum = record->transaction_checksum;
+    scan->commit_image_count = record->image_count;
   } else if (record->record_type == ZI_FS_JOURNAL_RECORD_CHECKPOINT) {
-    return ZI_STATUS_CORRUPT_FILESYSTEM;
+    if (scan->found_checkpoint) {
+      return ZI_STATUS_CORRUPT_FILESYSTEM;
+    }
+    scan->found_checkpoint = true;
+    scan->checkpoint_sequence = record->sequence;
+    scan->checkpoint_checksum = record->transaction_checksum;
+    scan->checkpoint_image_count = record->image_count;
   }
   return ZI_STATUS_SUCCESS;
 }
@@ -366,7 +378,16 @@ validate_recovery_scan(const ZiFsVolume* volume, void* workspace, RecoveryScan* 
   checksum = finalise_transaction_checksum(checksum);
   if (scan->found_commit &&
       (previous_sequence == UINT64_MAX || scan->commit_sequence != previous_sequence + 1u ||
-       scan->commit_checksum != checksum)) {
+       scan->commit_checksum != checksum || scan->commit_image_count != scan->image_count)) {
+    return ZI_STATUS_CORRUPT_FILESYSTEM;
+  }
+  // CHECKPOINT may be durable while the final empty-header publication is not.
+  // It is evidence only after the entire redo set and matching COMMIT validate.
+  // Replaying that validated set again is idempotent; never trust CHECKPOINT alone.
+  if (scan->found_checkpoint && (!scan->found_commit || scan->commit_sequence == UINT64_MAX ||
+                                 scan->checkpoint_sequence != scan->commit_sequence + 1u ||
+                                 scan->checkpoint_checksum != checksum ||
+                                 scan->checkpoint_image_count != scan->image_count)) {
     return ZI_STATUS_CORRUPT_FILESYSTEM;
   }
   return ZI_STATUS_SUCCESS;

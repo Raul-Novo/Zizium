@@ -102,6 +102,10 @@ static bool test_phase8_security_boundary(void);
 static bool test_phase8_nvme_window(void);
 static bool test_phase8_service_identity(void);
 static bool test_phase8_image_authorisation(void);
+static bool test_phase8_identity(void);
+static bool test_phase8_database(void);
+static bool test_phase8_store(void);
+static bool test_phase8_acceptance(void);
 static ZiStatus memory_read_blocks(void* context,
                                    uint64_t first_block,
                                    uint32_t block_count,
@@ -176,6 +180,10 @@ int main(void) {
       {"NVMe register alignment and doorbell bounds", test_phase8_nvme_window},
       {"Approved bootstrap service identities and restricted tokens", test_phase8_service_identity},
       {"Image source and directory traversal authorisation", test_phase8_image_authorisation},
+      {"Authority-bound native identity and reservation", test_phase8_identity},
+      {"Bound identity database codec and tombstones", test_phase8_database},
+      {"Private identity storage and atomic issuance", test_phase8_store},
+      {"Native identity acceptance boot contract", test_phase8_acceptance},
       {"terminal scrollback and history", test_terminal},
       {"display scaling", test_display_scale},
       {"Luma tokenisation", test_luma},
@@ -1569,6 +1577,31 @@ static bool test_phase8_service_identity(void) {
 static bool test_phase8_image_authorisation(void) {
   size_t assertion_count = 0;
   bool result = phase8_image_authorisation_test(&assertion_count);
+  g_assertion_count += assertion_count;
+  return result;
+}
+
+static bool test_phase8_identity(void) {
+  size_t assertion_count = 0;
+  bool result = phase8_identity_test(&assertion_count);
+  g_assertion_count += assertion_count;
+  return result;
+}
+static bool test_phase8_database(void) {
+  size_t assertion_count = 0;
+  bool result = phase8_database_test(&assertion_count);
+  g_assertion_count += assertion_count;
+  return result;
+}
+static bool test_phase8_store(void) {
+  size_t assertion_count = 0;
+  bool result = phase8_store_test(&assertion_count);
+  g_assertion_count += assertion_count;
+  return result;
+}
+static bool test_phase8_acceptance(void) {
+  size_t assertion_count = 0;
+  bool result = phase8_acceptance_test(&assertion_count);
   g_assertion_count += assertion_count;
   return result;
 }

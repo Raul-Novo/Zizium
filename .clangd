@@ -49,7 +49,7 @@ Style:
 
 Diagnostics:
   UnusedIncludes: Strict
-  MissingIncludes: Strict
+  MissingIncludes: None
 
   Includes:
     AnalyzeAngledIncludes: false

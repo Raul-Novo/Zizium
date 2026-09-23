@@ -4,7 +4,7 @@ PE32+ is Zizium's native executable and module format: `.efi` for firmware/boot
 images, `.exe` for user programmes, `.dll` for libraries, and `.sys` for kernel
 drivers. ELF is not a native format.
 
-## Implemented in Seed
+## Implemented
 
 The bounded parser validates DOS and PE signatures, AMD64 COFF headers, optional
 header size and PE32+ magic, image/header alignment and ranges, section-table
@@ -25,7 +25,7 @@ rejecting unsupported relocation types and malformed blocks. A generic
 versioned image-access interface lets the same bounded relocation and
 import/export walkers operate on host buffers and process mappings.
 
-The Seed user loader accepts AMD64 Native-subsystem programmes and DLLs with
+The current user loader accepts AMD64 Native-subsystem programmes and DLLs with
 4 KiB section alignment. It rejects rounded section overlap and sections that
 intrude into header pages, finds deterministic free lower-half ranges, can
 force the main image away from its preferred base, applies DIR64 relocations,
@@ -72,7 +72,7 @@ entries, mapping rollback, contents, and final permissions. `llvm-readobj` and
 The source table and ZiFS reader form a real filesystem-backed loader path, but
 not a general image namespace or file-object cache. The fixed image-set
 capacity, eager whole-file reads, synchronous ownership,
-and exact core DLL graph are suitable for Seed acceptance but not arbitrary
+and exact core DLL graph are suitable for initial acceptance but not arbitrary
 application dependency graphs. Driver-image loading, reference-counted shared
 DLL mappings, process-to-process page sharing, unload ordering, and loader-lock
 semantics remain scaffolded.

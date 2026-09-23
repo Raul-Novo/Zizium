@@ -7,7 +7,7 @@ information.
 
 Planned commands include `zpkg install`, `update`, `remove`, and `search`.
 
-## Implemented in Seed
+## Implemented
 
 The ZiFS hierarchy reserves package, manifest, cache, and rollback directories.
 No package parser, command, or installation transaction exists.

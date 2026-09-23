@@ -2,20 +2,33 @@
 
 Zizium is an experimental PE/COFF-native, case-sensitive operating system. It is
 UEFI-first and non-POSIX by design, with a modular monolithic kernel.
-The present milestone is **Zizium 0.3 "ZiFS"**.
+The present milestone is **Zizium 0.3**.
 
 This repository is a foundation, not a daily-use operating system. Booted
 vertical slices and host-tested algorithms are identified separately from
 interfaces which reserve future architecture.
 
-Phase 8 is active. Its prerequisites enforce bounded token memberships,
+Identity and access management is under development. Existing controls enforce bounded token memberships,
 inheritance-only ACE semantics, approved bootstrap service identities, restricted
 service/session groups, and launch-token ACL checks for executable/DLL sources.
 Durable accounts and logon are not implemented.
+An authority-bound native-identity codec and unpublished ID-reservation primitive
+are now host-tested; neither creates a database account or logon token. See
+[the identity contract](docs/identity.md).
+New images provision a SYSTEM-only `C:\Zizium\Security` subtree. This is a
+private-storage prerequisite, not a credential database or completed logon.
 The build now mandates `-Weverything -Werror`, with individually scoped
 exceptions documented in [the build contract](docs/build.md). Known remaining
 identity and authorisation limitations are listed in
 [security.md](docs/security.md); bootstrap sessions are not secure logon.
+
+The bounded identity database and its ZiFS storage wrapper validate private
+policy and commit disabled records with allocation state before publishing an
+identity. Host fault tests and six dedicated NVMe boots verify persistence,
+tombstones, non-reuse and access denials. Production enrolment and authentication
+remain unimplemented; normal images contain no database or credentials. See
+[the database contract](docs/identity_database.md) and the latest verification
+report for the supported scope and limitations.
 
 ## Current vertical slice
 
@@ -112,6 +125,7 @@ make image
 make boot-test
 make storage-test
 make zifs-test
+make identity-test
 make fault-test
 make run
 ```

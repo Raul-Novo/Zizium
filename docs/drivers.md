@@ -9,7 +9,7 @@ keyboard and mouse, display and monitor, HDMI and DisplayPort, SATA/PATA/IDE,
 AHCI, NVMe, block storage, audio and SPDIF, printers, network, timers, RTC,
 serial, memory information, battery, power, and thermal control.
 
-## Implemented in Seed
+## Implemented
 
 Versioned `ZiDriverObject`, `ZiDeviceObject`, `ZiDriverContext`,
 `ZiPlugAndPlayManager`, and `ZiPowerManager` structures exist. A validated

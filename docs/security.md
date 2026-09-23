@@ -6,13 +6,16 @@ POSIX owner/group/mode bits as its primary policy.
 
 Identities are represented conceptually as `NID:SYSTEM`,
 `NID:ADMINISTRATORS`, `NID:USERS`, `NID:GUESTS`, `NID:SERVICE:<name>`, and
-`NID:USER:<id>`. Seed uses authority/value pairs internally; durable NID
-encoding is not yet frozen.
+`NID:USER:<id>`. Zizium uses authority/value pairs internally; existing eight-byte
+ACL identities remain unchanged. The separate version-one issuer-bound native identity
+encoding is defined in [identity.md](identity.md); it is not yet a persistent
+account or token-issuance path in normal boot. The verified persistence
+boundary is documented in [identity_database.md](identity_database.md).
 
 Access bits are Read, Write, Execute, Delete, List, Create, ModifyAcl,
 TakeOwnership, and their FullControl union.
 
-## Implemented in Seed
+## Implemented
 
 The host-tested token validator requires a versioned token, a recognised user
 authority, a bounded group array, and recognised group identities. The access
@@ -22,7 +25,7 @@ every requested bit is granted. A matching deny ACE rejects its intersecting
 request. Missing or empty discretionary ACLs deny access. There is no implicit
 administrator or SYSTEM bypass.
 
-Every Seed user process is created with a validated token before its address
+Every current user process is created with a validated token before its address
 space is entered. The process owns a copy of the group array, preventing the
 launch caller from changing group membership after creation. Teardown clears
 that token storage together with the process slot. Host tests cover malformed
@@ -31,7 +34,7 @@ tokens and lifecycle binding in addition to ACL decisions.
 Tests cover deny precedence, group grants, partial access, empty ACLs, invalid
 inputs, and default denial.
 
-The Phase 8 prerequisite correction caps tokens at 16 group entries before any
+The identity and access management prerequisite correction caps tokens at 16 group entries before any
 group is read. SYSTEM, USER, and SERVICE may be token principals; GROUP may
 only appear as a membership. Duplicate and invalid memberships are rejected.
 The process-owned array uses the same capacity constant. An inheritance-only
@@ -46,13 +49,30 @@ CRC32C. Mount rejects malformed identities, access masks, flags, ordering,
 reserved bytes, checksums, duplicate IDs, and any live file record whose
 security ID is absent.
 
-`mkzifs.exe` assigns descriptor ID 1 to the initial hierarchy. The default
+`mkzifs.exe` assigns descriptor ID 1 to the public initial hierarchy. The default
 ordered DACL denies Guests mutation rights, grants SYSTEM and Administrators
 FullControl, and grants Users Read, Execute, and List. A normal QEMU boot loads
 that root descriptor and proves SYSTEM allow, Users read allow, Guests write
 deny, and default deny for an unlisted identity. A separate corrupted-table
 boot must reject direct mounting before policy use and may continue only via
 the explicitly requested clean recovery module.
+
+Newly formatted volumes assign descriptor ID 2 to the exact
+`C:\Zizium\Security` subtree, including files imported by the formatter.
+It has owner SYSTEM:1, primary group Administrators, and one explicit
+SYSTEM:1 FullControl allow ACE. Primary-group membership is metadata, not a
+grant: Users, Guests, Administrators, service principals and other SYSTEM
+values receive no access. Runtime lookup uses the stored descriptor, not the
+path spelling as an authorisation exception. The bootstrap checks every right
+and denied traversal before emitting `ZIFS_PRIVATE_SECURITY`.
+
+This is initial-image provisioning, not dynamic ACL inheritance, a private
+profile implementation or a credential database. No secret is stored yet.
+Trusted raw metadata/transaction interfaces remain kernel-only mechanisms.
+Old volumes are not silently migrated: rebuild disposable development images;
+an installed-system migration needs an explicit journalled policy update.
+The two approved SYSTEM hand-off programmes share this initial access; a future
+dedicated broker identity must replace that broad bootstrap trust explicitly.
 
 The offline ZiFS repair boundary treats security metadata as evidence, never
 as reconstructible data. A plan is refused when any security-table checksum,
@@ -80,7 +100,16 @@ SessionHost and Luma use distinct identities, while their channel descriptor
 contains ordered allow ACEs for only those two token users. No administrator or
 SYSTEM bypass is introduced.
 
-## Active Phase 8 work
+## Active identity and access management work
+
+The disabled-record database now validates binding, bounded records and private
+file policy, and commits high-water state before returning issued IDs. Host
+tests require denial before payload reads, non-reuse after tombstone deletion,
+and coherent old/new recovery at every commit write/flush boundary. Six dedicated
+native boots also verify persistence, tombstones, non-reuse and access denials.
+Production provisioning and full security acceptance remain outstanding. It does not
+accept credentials, enable accounts, mint tokens or establish rollback protection
+across reboot. Normal images still contain no identity database.
 
 Read [identity_security.md](identity_security.md) for the threat model and
 credential dependency evaluation. The bootstrap now resolves only five approved
@@ -107,7 +136,7 @@ Read/Execute bits, DLL rollback, and corrupt policy. QEMU requires denial of an
 unprovisioned SYSTEM service and of an image launch under an unlisted identity,
 with no process publication or kernel-pool allocation leak.
 
-The next security boundary is a durable, versioned NID and identity database,
+The remaining security boundary requires production identity provisioning,
 credential-verified logon, database-derived token construction, persistent
 ownership/default ACL inheritance, restricted service tokens, checked
 privileges, explicit elevation, and structured audit evidence. Its initial
@@ -131,9 +160,9 @@ application, and owner changes are not yet exposed.
 
 ## Future
 
-Durable identity storage, password hashing, logon, token creation, ACL
+Production identity provisioning, password hashing, logon, token creation, ACL
 inheritance, owner changes, auditing, elevation, service isolation, app
 capabilities, revocation, impersonation, and security-descriptor caching need
 implementation and adversarial review. Privilege separation alone is not an
 authorisation model; no protected service or user session should rely on the
-Seed token contract yet.
+initial token contract yet.

@@ -1,6 +1,6 @@
 # Identity and credential security boundary
 
-Review date: 2026-09-05. This document defines the Phase 8 threat model and a
+Review date: 2026-09-05. This document defines the identity and access management threat model and a
 dependency evaluation, not an authentication implementation. Read it with
 [security.md](security.md), [accounts.md](accounts.md),
 [services.md](services.md), and [zifs.md](zifs.md). The byte-level NID and
@@ -8,13 +8,26 @@ database specifications must refine these requirements without weakening them.
 
 ## Implemented
 
-The existing executive validates Seed authority/value identifiers and owned
+The existing executive validates initial authority/value identifiers and owned
 process tokens, evaluates ordered ACLs, and enforces granted handle rights.
 ZiFS persists checksummed security descriptors and validates live references.
 Its journal provides bounded old-or-new recovery for supported mutations.
 The service/session path still uses trusted bootstrap tokens. No password is
 accepted, no persistent account authenticates a session, and no elevation
 service is operational.
+
+The 2026-09-16 identifier prerequisite implements the 32-byte native identity
+codec and explicit one-issuer resolution described in [identity.md](identity.md).
+It compares the complete issuer and returns only unpublished dynamic reservation
+candidates. It does not establish issuer trust, persist high-water state, create
+accounts or authenticate a user. Existing eight-byte ACL identities are unchanged.
+
+New images provision an explicit SYSTEM:1-only Security directory and imported
+children. This removes the default Users-readable policy there, but the
+database must still validate its bound object and descriptor before use.
+No credential or account database is created. The two approved SYSTEM bootstrap
+programmes remain equally trusted; a dedicated broker identity and controlled
+policy migration are still required.
 
 The 2026-09-08 prerequisite implementation replaces hash-based service principals
 with explicit reserved launch policy, removes bootstrap Administrators grants,
@@ -26,13 +39,21 @@ This review establishes design requirements only. A wire codec or a passing
 format test does not establish identity issuance, database trust, credential
 verification, or two-user isolation.
 
+The database/store prerequisite has host-tested bounded disabled records,
+binding checks, actual private-policy checks, transaction-backed issuance and
+tombstones. Its format and trust limits are in
+[identity_database.md](identity_database.md). Six dedicated NVMe boots verify
+persistence, non-reuse and binding/access denials. A production trusted
+provisioning source is still absent. This is not credential
+verification or completion of the requirements below.
+
 ## Scaffolded
 
 SecurityHost is the intended account/credential broker; SessionHost owns
 interactive sessions; ServiceHost requests restricted service launches. Their
 current hand-off programmes are not resident security services. Privilege and
 inheritance fields reserve future semantics. Public token creation, protected
-credential input, secret-memory services, database updates, and authentication
+credential input, secret-memory services, service-facing database updates, and authentication
 IPC remain unimplemented.
 
 ## Assets, adversaries, and trust boundaries
@@ -310,7 +331,7 @@ unauthenticated disk is not tamper-proof evidence or an anti-rollback anchor.
 
 ## Future implementation and acceptance
 
-Phase 8 remains incomplete until the real credential, persistence, token,
+Identity and access management remains incomplete until the real credential, persistence, token,
 ownership, elevation, and audit boundaries work. Required adversarial evidence
 includes:
 
@@ -338,7 +359,7 @@ includes:
 8. Secret cleanup, log/dump redaction, event loss, revocation semantics, and
    cloned/rolled-back authority behaviour are tested at their real boundaries.
 
-Compatibility is deliberate: preserve current Seed descriptors and bootstrap
+Compatibility is deliberate: preserve existing descriptors and bootstrap
 tests until a separately versioned migration exists. Migration must bind old
 numeric pairs to the chosen authority, preserve explicit ACL order, reserve
 non-reusable IDs, and reject ambiguous mappings. Upgrade must not silently

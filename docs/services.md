@@ -30,7 +30,7 @@ loads each PE and its core DLLs from exact-case ZiFS paths:
 4. `MountHost.exe`;
 5. `SessionHost.exe`.
 
-The first four are short-lived Phase 6 bootstrap hand-off programmes. They run
+The first four are short-lived bootstrap hand-off programmes. They run
 with explicit SYSTEM or service tokens and must exit successfully. They are not
 resident production service implementations. A real `ServiceHost.exe` failure
 probe exits with status 21; the supervisor launches it three times under an
@@ -51,7 +51,7 @@ restart policy, launch failures, non-zero exits, and restart exhaustion.
 
 ## Scaffolded
 
-Only the five core manifests have executable Phase 6 bootstrap paths. The
+Only the five core manifests have executable service and session bootstrap paths. The
 remaining manifests reserve future components and remain `Status=Scaffolded`.
 The four core hand-off processes do not stay resident, accept control requests,
 write persistent logs, or provide their long-term service functionality.
@@ -62,7 +62,7 @@ resource quota, capability derivation from `Permissions`, or durable state.
 The service-token IDs are reserved bootstrap identities, not durable NIDs
 issued by an identity database.
 
-Phase 8 must replace those trusted bootstrap identity inputs with bounded
+Identity and access management must replace those trusted bootstrap identity inputs with bounded
 database-backed service identities and auditable token construction before any
 service is treated as a persistent security boundary.
 

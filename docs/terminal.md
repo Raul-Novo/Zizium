@@ -4,7 +4,7 @@ The terminal stores Unicode cells independently from framebuffer pixels. Its
 visible viewport is a window over a larger scrollback ring; scrolling does not
 mutate the underlying logical lines.
 
-## Implemented in Seed
+## Implemented
 
 The caller supplies bounded cell and line-use storage. Cells hold a scalar, two
 combining scalars, foreground/background colours, display width, and

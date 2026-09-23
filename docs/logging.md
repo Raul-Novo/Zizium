@@ -13,30 +13,30 @@ C:\Zizium\Logs\Boot
 C:\Zizium\Logs\Crash
 ```
 
-## Implemented in Seed
+## Implemented
 
 The early kernel has a fixed in-memory ring and COM1/framebuffer rendering.
 Boot-stage markers cover CPU-table ownership, exception readiness, physical and
 virtual memory ownership, temporary mapping, pool/cache readiness, guarded
 stacks, memory stress, APIC timer start, real scheduler ticks, pre-emption,
-ZiFS, framebuffer state, and Luma. Phase 4 adds exact markers for object
+ZiFS, framebuffer state, and Luma. Executive tests add exact markers for object
 namespace lookup, granted handle access, dispatcher waits, two-process IPC,
 secured handle transfer, and process-release cleanup. Fault-test markers
 separately identify the requested fault, selected handler, stack-guard
-classification, recursive-fault emergency path, and bounded panic. Phase 5
-adds exact markers for I/O/DMA readiness, ACPI/PCIe discovery, NVMe, GPT,
+classification, recursive-fault emergency path, and bounded panic. Hardware and
+storage tests add exact markers for I/O/DMA readiness, ACPI/PCIe discovery, NVMe, GPT,
 partition binding, repeated storage reads, direct ZiFS mount, injected timeout,
 corrupt-GPT rejection, and explicit module recovery. There is no clocked
 timestamp or persistent writer.
 
-Phase 6 adds markers for filesystem PE sourcing, manifest/DAG validation,
+Service and session tests add markers for filesystem PE sourcing, manifest/DAG validation,
 each core service hand-off, bounded service failure and restart exhaustion,
 session-channel creation, SessionHost completion, user process create/wait,
 Luma child completion, user-mode Luma readiness, and leak-free session
 teardown. QEMU requires the corresponding user-visible service, session, and
 Luma messages as evidence rather than accepting markers alone.
 
-Phase 7 adds distinct markers for a clean durable create, persisted reboot
+ZiFS durability adds distinct markers for a clean durable create, persisted reboot
 verification, injected rollback and replay boundaries, redundant-superblock
 repair, rollback, replay, and exact present/absent verification. The QEMU gate
 also rejects recovery markers during the clean reboot, so recovery cannot hide
@@ -90,6 +90,13 @@ kernel recovery event. After the reviewed three-action repair reaches a clean
 fixed point, the next boot must emit ordinary direct-mount and clean-unmount
 evidence while forbidding rollback, replay, redundancy-repair, and unclean-
 mount recovery markers.
+
+The dedicated identity persistence gate requires `IDENTITY_BINDING_DENIED`,
+`IDENTITY_ACCESS_DENIED` and `IDENTITY_PERSISTENCE` together with the exact
+stage number and clean-unmount evidence. The first two follow real rejected
+store operations; the last follows full record/generation validation. Host-side
+inspection and independent byte comparison remain required. These markers are
+not emitted by normal boot and do not represent authenticated logon or audit.
 
 ## Scaffolded
 

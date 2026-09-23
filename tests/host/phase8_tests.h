@@ -9,3 +9,7 @@ bool phase8_security_boundary_test(size_t* out_assertion_count);
 bool phase8_nvme_window_test(size_t* out_assertion_count);
 bool phase8_service_identity_test(size_t* out_assertion_count);
 bool phase8_image_authorisation_test(size_t* out_assertion_count);
+bool phase8_identity_test(size_t* out_assertion_count);
+bool phase8_database_test(size_t* out_assertion_count);
+bool phase8_store_test(size_t* out_assertion_count);
+bool phase8_acceptance_test(size_t* out_assertion_count);

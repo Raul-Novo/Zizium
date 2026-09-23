@@ -7,7 +7,7 @@ an unimplemented feature.
 Reserved locations include `C:\Recovery`, `C:\Recovery\Rollback`, and
 `C:\System Volume\Snapshots`.
 
-## Implemented in Seed
+## Implemented
 
 ZiFS has transaction rollback/replay, redundant-superblock selection and
 repair, explicit flush and clean-unmount state, and automatic recovery of a

@@ -5,7 +5,7 @@ applications, and services. Keyboard navigation, focus visibility, scalable
 text, high contrast, reduced motion, screen reading, and alternative input must
 not be retrofitted solely at the application layer.
 
-## Implemented in Seed
+## Implemented
 
 The framebuffer terminal uses high-contrast theme roles, a visible cursor,
 distinct glyphs, Unicode cells, and resolution-aware scaling. Serial output

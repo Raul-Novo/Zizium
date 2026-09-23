@@ -3,7 +3,7 @@
 ZCC is the future integrated C compiler. The current `zcc.exe` is a Windows-host
 driver scaffold, not a compiler.
 
-## Implemented in Seed
+## Implemented
 
 The host tool reports its version and frozen target name
 `x86_64-pc-zizium-pe`. It rejects compilation with a clear message rather than

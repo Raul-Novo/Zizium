@@ -7,7 +7,7 @@ The model reserves input, keyboard, and mouse devices; Shift, Control, Alt,
 AltGr, Caps Lock, and Num Lock; keyboard layouts; dead-key/composition state;
 and timestamped text input.
 
-## Implemented in Seed
+## Implemented
 
 Versioned structures and a strict translation boundary exist. The translation
 routine validates devices and events, but returns

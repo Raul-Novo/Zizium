@@ -4,7 +4,7 @@ The future `ZiAudio` stack consists of AudioHost, device endpoints, an audio
 session per application, mixing, per-application volume, routing, capture
 permissions, and a later low-latency path.
 
-## Implemented in Seed
+## Implemented
 
 No audio data path or hardware driver is implemented.
 

@@ -10,7 +10,7 @@ Object types include processes, threads, files, directories, devices, drivers,
 volumes, events, mutexes, semaphores, timers, sections, tokens, ports, channels,
 displays, input devices, and power objects.
 
-## Implemented in Seed
+## Implemented
 
 `ZiObjectHeader` records a registered type and versioned operations table,
 exact UTF-8 name, parent, security descriptor, debug name, reference count,
@@ -37,7 +37,7 @@ requires a leading backslash, rejects empty, `.` and `..` components, forward
 slashes, embedded NUL bytes, malformed UTF-8, and traversal through a
 non-directory object.
 
-Every Seed user process owns a 32-entry `ZiHandleTable`. A 64-bit opaque handle
+Every current user process owns a 32-entry `ZiHandleTable`. A 64-bit opaque handle
 encodes a non-zero generation and slot, so a closed slot cannot be reused
 through a stale value. A slot is retired permanently instead of wrapping after
 generation `UINT32_MAX`, preserving that guarantee even at the generation
@@ -78,5 +78,5 @@ audit context, quotas, and a general allocation policy remain unspecified.
 Later phases connect every device, driver, volume, file, and service object to
 a persistent namespace, complete the handle boundary, add namespace policy and
 auditing, and replace fixed capacities where a measured dynamic policy is
-appropriate. Phase 16 must harden locking for SMP contention and define
+appropriate. SMP support requires locking suitable for contention and defined
 processor-level lock ordering without changing exact-case name semantics.

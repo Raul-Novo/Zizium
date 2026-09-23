@@ -6,7 +6,7 @@ packets. Requests carry a
 major operation, status, access context, input/output buffers, byte counts,
 offset, completion routine, and stack location.
 
-## Implemented in Seed
+## Implemented
 
 Versioned request and dispatch structures, operation numbers, completion state,
 device-stack links, and a generic version-three `ZiBlockDevice`

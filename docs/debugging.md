@@ -4,7 +4,7 @@ The debugging architecture reserves serial diagnostics, structured kernel
 events, crash dumps, symbols, stack traces, PE debug information, driver
 verification, syscall tracing, and user-facing crash inspection.
 
-## Implemented in Seed
+## Implemented
 
 COM1 is initialised at boot and supports bounded polling input/output. The
 kernel log records severity, subsystem, message, and sequence in a fixed ring,

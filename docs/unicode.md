@@ -5,10 +5,10 @@ A Unicode scalar is a 32-bit value excluding surrogates and values above
 U+10FFFF. Invalid input is never silently treated as a filename.
 
 Filesystem component comparison validates both operands and compares their
-exact UTF-8 sequences. Seed performs no normalisation or case folding;
+exact UTF-8 sequences. Zizium performs no normalisation or case folding;
 canonically equivalent sequences therefore remain different names.
 
-## Implemented in Seed
+## Implemented
 
 - Strict UTF-8 validation and iteration.
 - Rejection of overlong encodings, surrogates, truncation, illegal continuation

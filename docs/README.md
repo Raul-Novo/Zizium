@@ -1,15 +1,22 @@
 # Zizium documentation index
 
-This index describes the current Zizium 0.3 "ZiFS" documentation set. Each subsystem
+This index describes the current Zizium 0.3 documentation set. Each subsystem
 document separates implemented behaviour from scaffolded interfaces and future
-work. Phases 0–7 are complete. Phase 7 includes bounded durable mutation,
+work. The verified storage implementation includes bounded durable mutation,
 journalling, recovery, lifecycle handling, read-only inspection, and a separate
-fail-closed offline repair tool. Phase 8 durable identity and logon work is the
-current engineering focus.
+fail-closed offline repair tool. Durable identity and logon are the current
+engineering focus; their status is not a production security claim.
 
-The latest prerequisite slice adds explicit restricted service launch policy
-and token-bound EXE/DLL/traversal access checks. See [services](services.md),
+The launch boundary enforces restricted service policy and token-bound
+EXE/DLL/traversal access checks. See [services](services.md),
 [security](security.md) and [PE/COFF](pe_coff.md); this is not secure logon.
+Native-ID primitives and SYSTEM-only initial security-directory provisioning
+are also implemented prerequisites; no production account has been provisioned.
+
+Disabled-record persistence, private-policy validation and crash recovery are
+host-tested. Six dedicated NVMe boots additionally verify durable issuance,
+tombstones, non-reuse and access denials. Normal boot and logon do not use a
+database yet; see the database contract and verification report.
 
 ## Foundations
 
@@ -31,6 +38,8 @@ and token-bound EXE/DLL/traversal access checks. See [services](services.md),
 - [Object manager](object_manager.md)
 - [Scheduler](scheduler.md)
 - [Security](security.md)
+- [Native identity encoding and reservation](identity.md)
+- [Bound identity database and storage](identity_database.md)
 - [Identity and credential threat model](identity_security.md)
 - [IPC](ipc.md)
 - [I/O manager](io_manager.md)

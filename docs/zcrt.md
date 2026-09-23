@@ -3,7 +3,7 @@
 ZiCRT is the C runtime bridge between standard C and Zizium. It is not the
 public operating-system API and does not force applications to use ZIA.
 
-## Implemented in Seed
+## Implemented
 
 The x64 PE start-up object exposes `ZiCrtStart`, validates the process parameter
 pointer, establishes a normal C call, invokes ordinary `main`, and forwards its
@@ -19,7 +19,7 @@ int main(int argc, char *argv[]);
 without `zizium.h`, ZIA, or `ZiMain`. `hello_arguments.exe` proves the second
 form receives arguments containing spaces and UTF-8 data.
 
-`zicrt.dll` is a real PE library loaded through the Seed import resolver. Its
+`zicrt.dll` is a real PE library loaded through the current import resolver. Its
 `ZiCrtInitialiseProcess` validates the version-one, 72-byte parameter block,
 declared string lengths, pointer arrays, image path, and argument zero. The
 minimal `getenv` implementation performs exact-case environment-name lookup;

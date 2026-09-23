@@ -12,6 +12,9 @@ import subprocess
 import sys
 import time
 
+from private_storage_tests import check_private_storage
+from identity_fixtures import DESTINATION, binding, check_snapshot, database_fixture
+
 CORE_SOURCES = (
     "kernel/runtime/byte_order.c",
     "kernel/runtime/crc32.c",
@@ -26,6 +29,9 @@ CORE_SOURCES = (
     "kernel/display/display.c",
     "kernel/executive/security/access_check.c",
     "kernel/executive/security/identity.c",
+    "kernel/executive/security/identity_database.c",
+    "kernel/executive/security/identity_store.c",
+    "kernel/executive/security/identity_acceptance.c",
     "kernel/executive/runtime/executive_lock.c",
     "kernel/executive/object/object.c",
     "kernel/executive/wait/dispatcher.c",
@@ -1126,6 +1132,7 @@ def boot_test(root: Path, configuration: str) -> None:
         "[ZI:BOOT:ZIFS_DIRECT]",
         "[ZI:BOOT:ZIFS_MOUNT]",
         "[ZI:BOOT:ZIFS_SECURITY]",
+        "[ZI:BOOT:ZIFS_PRIVATE_SECURITY]",
         "[ZI:BOOT:ZIFS_FILE_READ]",
         "[ZI:BOOT:CASE_SENSITIVE]",
         "[ZI:BOOT:SERVICE_MANIFESTS]",
@@ -1488,6 +1495,84 @@ def create_zifs_gpt_repair_fixture(image_path: Path) -> None:
         os.fsync(image.fileno())
 
 
+def identity_boot_test(root: Path, configuration: str) -> None:
+    build_root = host_build(root, configuration)
+    kernel_path = kernel_build(root, configuration, build_root)
+    native_outputs = native_artifacts_build(root, configuration, build_root)
+    run([str(build_root / "host" / "pecheck.exe"), "--kind", "kernel", str(kernel_path)], root=root)
+    generated = build_root / "generated"
+    generated.mkdir(parents=True, exist_ok=True)
+    fixture = generated / "identity-empty.bin"
+    fixture.write_bytes(database_fixture(1, crc32c))
+    inputs = {DESTINATION: fixture}
+    # Establish file identity from our trusted formatter output BEFORE any guest runs.
+    image_build(root, configuration, build_root, kernel_path,
+                image_name="zizium-identity-template.img", native_outputs=native_outputs,
+                additional_zifs_inputs=inputs)
+    raw_path = build_root / "images" / "zizium-root.zifs"
+    try:
+        expected_binding = binding(raw_path)
+    except ValueError as error:
+        raise BuildFailure(str(error)) from error
+    source = (root / "boot" / "limine" / "limine.conf").read_text(encoding="utf-8")
+    command_line = "    cmdline: release=Seed root=C:"
+    if source.count(command_line) != 1:
+        raise BuildFailure("Identity acceptance needs one known Limine command line.")
+    firmware = build_root / "firmware"
+    firmware.mkdir(parents=True, exist_ok=True)
+    _, variables_template = locate_firmware()
+    persistent = build_root / "images" / "zizium-identity-persistent.img"
+    required = (
+        "NVME_READY", "ZIFS_DIRECT", "ZIFS_PRIVATE_SECURITY", "IDENTITY_BINDING_DENIED",
+        "IDENTITY_ACCESS_DENIED", "IDENTITY_PERSISTENCE", "CASE_SENSITIVE", "STANDARD_C_MAIN",
+        "SERVICE_POLICY_DENIED", "IMAGE_ACCESS_DENIED", "PREEMPTION", "USER_SESSION",
+        "ZIFS_VOLUME_FLUSHED", "ZIFS_CLEAN_UNMOUNT",
+    )
+    for stage in range(1, 7):
+        config = generated / f"limine-identity-{stage}.conf"
+        token = f"zi.identity={stage}:{expected_binding[0]}:{expected_binding[1]}"
+        config.write_text(source.replace(command_line, f"{command_line} {token}", 1),
+                          encoding="utf-8", newline="\n")
+        stage_image = image_build(
+            root, configuration, build_root, kernel_path, limine_configuration=config,
+            image_name=f"zizium-identity-{stage}.img", native_outputs=native_outputs,
+            additional_zifs_inputs=inputs,
+        )
+        try:
+            if binding(raw_path) != expected_binding:
+                raise ValueError("Identity fixture binding changed between deterministic builds.")
+        except ValueError as error:
+            raise BuildFailure(str(error)) from error
+        if stage == 1:
+            shutil.copyfile(stage_image, persistent)
+        else:
+            copy_efi_system_partition(stage_image, persistent)
+        variables = firmware / f"edk2-vars-identity-{stage}.fd"
+        shutil.copyfile(variables_template, variables)
+        serial = build_root / f"identity-{stage}-serial.log"
+        command = qemu_base_command(root, build_root, persistent, variables)
+        command.extend(["-display", "none", "-chardev",
+                        f"file,id=zi_serial,path={serial},append=off", "-serial", "chardev:zi_serial"])
+        output = run_headless_qemu(root, command, serial,
+                                   ("[ZI:BOOT:ZIFS_CLEAN_UNMOUNT]",), timeout_seconds=30.0)
+        print(output, end="" if output.endswith("\n") else "\n")
+        missing = [marker for marker in required if f"[ZI:BOOT:{marker}]" not in output]
+        forbidden = ("PANIC", "STORAGE_MODULE_FALLBACK", "ZIFS_RECOVERY_REPAIR",
+                     "ZIFS_RECOVERY_ROLLBACK", "ZIFS_RECOVERY_REPLAY", "ZIFS_RECOVERY_UNCLEAN")
+        if (missing or any(f"[ZI:BOOT:{marker}]" in output for marker in forbidden)
+                or f"Verified persistence stage=0x{stage:016x}" not in output):
+            raise BuildFailure(f"Identity stage {stage} failed its boot evidence: missing {missing}.")
+        run_zifs_inspector_case(root, build_root / "host" / "zifsinspect.exe", persistent,
+                                0, ("Result: valid ZiFS metadata",), None, mode="--gpt")
+        generation = (0, 2, 2, 3, 3, 4, 4)[stage]
+        try:
+            check_snapshot(persistent, expected_binding, database_fixture(generation, crc32c))
+        except ValueError as error:
+            raise BuildFailure(str(error)) from error
+        print(f"QEMU identity stage {stage} passed; exact generation {generation} persisted.")
+    print("QEMU identity persistence and denial tests passed across six boots.")
+
+
 def zifs_write_test(root: Path, configuration: str) -> None:
     build_root = host_build(root, configuration)
     kernel_path = kernel_build(root, configuration, build_root)
@@ -1646,6 +1731,7 @@ def zifs_write_test(root: Path, configuration: str) -> None:
         "[ZI:BOOT:ZIFS_DIRECT]",
         "[ZI:BOOT:ZIFS_MOUNT]",
         "[ZI:BOOT:ZIFS_SECURITY]",
+        "[ZI:BOOT:ZIFS_PRIVATE_SECURITY]",
     )
     recovery_markers = (
         "[ZI:BOOT:ZIFS_RECOVERY_REPAIR]",
@@ -2115,6 +2201,7 @@ def zifs_write_test(root: Path, configuration: str) -> None:
             "[ZI:BOOT:STORAGE_MODULE_FALLBACK]",
             "[ZI:BOOT:ZIFS_MOUNT]",
             "[ZI:BOOT:ZIFS_SECURITY]",
+            "[ZI:BOOT:ZIFS_PRIVATE_SECURITY]",
             "[ZI:BOOT:USER_SESSION]",
         ),
         ("[ZI:BOOT:ZIFS_DIRECT]",),
@@ -2520,7 +2607,7 @@ def zifs_inspector_tests(
         0,
         (
             "Access: read-only; recovery and repair are disabled",
-            "Security: 1 descriptors, 4 ACEs",
+            "Security: 2 descriptors, 5 ACEs",
             "Namespace: 75 live records",
             "Result: valid ZiFS metadata",
         ),
@@ -2892,6 +2979,28 @@ def run_tests(root: Path, configuration: str, *, sanitised: bool = False) -> Non
     )
     zifs_inspector_tests(root, build_root, image_path, test_environment)
     zifs_repair_tests(root, build_root, image_path, test_environment)
+    private_image = build_root / "tests" / "private-storage.zifs"
+    private_payload = build_root / "tests" / "private-fixture.bin"
+    private_payload.write_bytes(b"Non-secret storage policy fixture.\n")
+    private_command = [str(build_root / "host" / "mkzifs.exe"), str(private_image), "8"]
+    for path in (
+        r"C:\Zizium\Security\Private Fixture",
+        r"C:\Zizium\Security\private fixture",
+        r"C:\Zizium\SecurityOther",
+        r"C:\Zizium\security",
+        r"C:\Temp\Security",
+    ):
+        private_command.extend(["--file", path, str(private_payload)])
+    run(private_command, root=root, environment=test_environment)
+    run_zifs_inspector_case(
+        root, build_root / "host" / "zifsinspect.exe", private_image, 0,
+        ("Security: 2 descriptors, 5 ACEs", "Result: valid ZiFS metadata"), test_environment,
+    )
+    try:
+        check_private_storage(private_image)
+    except ValueError as error:
+        raise BuildFailure(str(error)) from error
+    print("ZiFS private-storage formatter policy passed for eight exact-case paths.")
     manifests = sorted((root / "userland" / "services" / "manifests").glob("*.zsvc"))
     run(
         [str(build_root / "host" / "zsvccheck.exe"), *map(str, manifests)],
@@ -2962,6 +3071,7 @@ def parse_arguments() -> argparse.Namespace:
             "fault-test",
             "storage-test",
             "zifs-test",
+            "identity-test",
             "run",
         ),
         default="all",
@@ -2988,6 +3098,8 @@ def main() -> int:
             storage_test(root, arguments.configuration)
         elif arguments.target == "zifs-test":
             zifs_write_test(root, arguments.configuration)
+        elif arguments.target == "identity-test":
+            identity_boot_test(root, arguments.configuration)
         elif arguments.target == "run":
             qemu_run(root, arguments.configuration)
         elif arguments.target in {"kernel", "image", "all"}:

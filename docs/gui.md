@@ -5,7 +5,7 @@ desktop shell, Settings, Files, and the Luma terminal. It is light by default,
 calm, keyboard navigable, accessibility-aware, and independently scaled per
 monitor. Dark mode is an option, not the sole identity.
 
-## Implemented in Seed
+## Implemented
 
 Only the shared colour palette, framebuffer abstraction, bitmap terminal, and
 per-output scale heuristic are implemented. There is no window system.

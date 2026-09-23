@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
   [ValidateSet('debug', 'release')] [string] $Configuration = 'debug',
-  [ValidateSet('all', 'host', 'kernel', 'image', 'analyse', 'intel', 'run', 'boot-test', 'fault-test', 'storage-test', 'zifs-test')]
+  [ValidateSet('all', 'host', 'kernel', 'image', 'analyse', 'intel', 'run', 'boot-test', 'fault-test', 'storage-test', 'zifs-test', 'identity-test')]
   [string] $Target = 'all'
 )
 

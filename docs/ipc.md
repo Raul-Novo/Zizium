@@ -4,7 +4,7 @@ Zizium's native IPC model uses named ports, connected channels, messages,
 shared sections, and dispatcher waits. RPC is a later protocol above these
 primitives, not a replacement for them.
 
-## Implemented in Seed
+## Implemented
 
 `ZiPort`, `ZiChannel`, and `ZiSharedSection` are real executive objects with
 security descriptors and reference-counted lifetimes. Ports and channels also
@@ -51,7 +51,7 @@ a bounded message, transfer a read-only section handle, wait for arrival, and
 prove handle cleanup through `IPC_EXCHANGE`, `IPC_HANDLE_TRANSFER`, and
 `IPC_PROCESS_CLEAN` markers.
 
-Phase 6 exposes a deliberately narrow public channel ABI. The version-one,
+The public channel ABI is deliberately narrow. The version-one,
 248-byte `ZiChannelMessage` contains the same identifiers, type, flags,
 explicit length, transfer metadata, and 192-byte inline payload bound as the
 kernel message. `ZxSendChannel`, `ZxReceiveChannel`, and
@@ -70,10 +70,10 @@ the other endpoint and the kernel releases both initial object references.
 
 Ports are not yet published in a persistent global namespace. There are no
 public port-create/connect/accept calls, shared-section mapping syscalls,
-blocking channel receive, or ZIA IPC convenience wrappers. The Phase 6 public
+blocking channel receive, or ZIA IPC convenience wrappers. The service and session public
 channel calls operate only on bootstrap handles assigned by the kernel.
 
-Shared-section mapping, message quotas beyond fixed Seed bounds, asynchronous
+Shared-section mapping, message quotas beyond fixed initial bounds, asynchronous
 I/O integration, cancellation tokens, impersonation, and RPC negotiation are
 not implemented. Caller-provided object and queue storage is suitable for the
 bounded bootstrap slice, not a general allocation service.

@@ -11,6 +11,8 @@
 #include "zi/display.h"
 #include "zi/early_shell.h"
 #include "zi/framebuffer_console.h"
+#include "zi/identity_acceptance.h"
+#include "zi/identity_store.h"
 #include "zi/kernel_memory.h"
 #include "zi/kernel_pool.h"
 #include "zi/log.h"
@@ -362,6 +364,9 @@ static void run_requested_architecture_test(const ZiBootContext* context,
                                             uint64_t guard_fault_address);
 static ZiStatus verify_case_sensitive_lookup(void);
 static ZiStatus verify_zifs_security(void);
+static ZiStatus verify_private_security(void);
+static ZiStatus run_identity_acceptance(const ZiBootContext* context);
+static ZiStatus verify_private_token(const ZiAccessToken* token, bool is_system);
 static ZiStatus verify_zifs_file_read(void);
 static ZiStatus verify_service_manifests(void);
 static bool command_line_has_token(const char* command_line, const char* token);
@@ -519,6 +524,16 @@ static _Noreturn void kernel_main_on_guarded_stack(void* context) {
     zi_panic("ZiFS durable security-descriptor verification failed.");
   }
   zi_log_boot_marker("ZIFS_SECURITY");
+  status = verify_private_security();
+  if (ZiFailed(status)) {
+    zi_panic("ZiFS private security-directory verification failed.");
+  }
+  zi_log_boot_marker("ZIFS_PRIVATE_SECURITY");
+  status = run_identity_acceptance(boot_context);
+  if (ZiFailed(status)) {
+    zi_log_write_hex(ZI_LOG_ERROR, "Identity", "Native persistence test status", (uint32_t)status);
+    zi_panic("The requested identity persistence test failed.");
+  }
   zi_log_write(ZI_LOG_INFORMATION,
                "Security",
                "Loaded the root ACL from ZiFS and verified allow, deny, and default-deny policy.");
@@ -2772,6 +2787,108 @@ static ZiStatus verify_zifs_security(void) {
                                    sizeof g_zifs_block_buffer);
   return status == ZI_STATUS_ACCESS_DENIED && granted == 0 ? ZI_STATUS_SUCCESS
                                                            : ZI_STATUS_INVALID_STATE;
+}
+
+static ZiStatus verify_private_token(const ZiAccessToken* token, bool is_system) {
+  const char directory[] = "C:\\Zizium\\Security";
+  const char missing_child[] = "C:\\Zizium\\Security\\Unprovisioned Identity Database";
+  ZiStringView components[3] = {0};
+  ZiParsedPath path = {0};
+  ZiStatus status = zi_path_parse_absolute(directory, sizeof directory - 1u, components, 3, &path);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  for (ZiAccessMask access = ZI_ACCESS_READ; access <= ZI_ACCESS_TAKE_OWNERSHIP; access <<= 1u) {
+    ZiFsFileRecord record = {.file_id = UINT64_MAX};
+    status = ZiFsLookupPathAuthorised(&g_root_volume,
+                                      &path,
+                                      token,
+                                      access,
+                                      g_zifs_block_buffer,
+                                      sizeof g_zifs_block_buffer,
+                                      &record);
+    if (is_system) {
+      if (ZiFailed(status) || record.file_type != ZI_FS_FILE_TYPE_DIRECTORY ||
+          record.security_id != 2) {
+        return ZI_STATUS_INVALID_STATE;
+      }
+    } else if (status != ZI_STATUS_ACCESS_DENIED || record.file_id != UINT64_MAX) {
+      return ZI_STATUS_INVALID_STATE;
+    }
+  }
+  status = zi_path_parse_absolute(missing_child, sizeof missing_child - 1u, components, 3, &path);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  ZiFsFileRecord record = {.file_id = UINT64_MAX};
+  status = ZiFsLookupPathAuthorised(&g_root_volume,
+                                    &path,
+                                    token,
+                                    ZI_ACCESS_READ,
+                                    g_zifs_block_buffer,
+                                    sizeof g_zifs_block_buffer,
+                                    &record);
+  ZiStatus expected = ZI_STATUS_ACCESS_DENIED;
+  if (is_system) {
+    expected = ZI_STATUS_NOT_FOUND;
+  }
+  return status == expected && record.file_id == UINT64_MAX ? ZI_STATUS_SUCCESS
+                                                            : ZI_STATUS_INVALID_STATE;
+}
+
+static ZiStatus run_identity_acceptance(const ZiBootContext* context) {
+  ZiIdentityAcceptanceParameters parameters = {0};
+  ZiStatus status = zi_identity_acceptance_parse(context->command_line, &parameters);
+  if (ZiFailed(status) || parameters.stage == 0) {
+    return status;
+  }
+  void* workspace = NULL;
+  status = zi_kernel_pool_allocate(ZI_IDENTITY_STORE_WORKSPACE_SIZE, &workspace);
+  if (ZiFailed(status)) {
+    return status;
+  }
+  status = zi_identity_acceptance_run(&g_root_volume,
+                                      &parameters,
+                                      workspace,
+                                      ZI_IDENTITY_STORE_WORKSPACE_SIZE);
+  ZiStatus cleanup = zi_kernel_pool_free(workspace);
+  if (ZiSucceeded(status)) {
+    status = cleanup;
+  }
+  if (ZiSucceeded(status)) {
+    zi_log_boot_marker("IDENTITY_BINDING_DENIED");
+    zi_log_boot_marker("IDENTITY_ACCESS_DENIED");
+    zi_log_write_hex(ZI_LOG_INFORMATION,
+                     "Identity",
+                     "Verified persistence stage",
+                     parameters.stage);
+    zi_log_boot_marker("IDENTITY_PERSISTENCE");
+  }
+  return status;
+}
+
+static ZiStatus verify_private_security(void) {
+  // Even owner-group membership and a different SYSTEM value confer no implicit rights.
+  const ZiSecurityId memberships[] = {
+      {ZI_SECURITY_AUTHORITY_GROUP, 1},
+      {ZI_SECURITY_AUTHORITY_GROUP, 2},
+      {ZI_SECURITY_AUTHORITY_GROUP, 3},
+  };
+  const ZiSecurityId principals[] = {
+      {ZI_SECURITY_AUTHORITY_SYSTEM, 1},
+      {ZI_SECURITY_AUTHORITY_USER, 21},
+      {ZI_SECURITY_AUTHORITY_SERVICE, 1},
+      {ZI_SECURITY_AUTHORITY_SYSTEM, 2},
+  };
+  for (size_t index = 0; index < sizeof principals / sizeof principals[0]; ++index) {
+    const ZiAccessToken token =
+        {sizeof(ZiAccessToken), ZI_ACCESS_TOKEN_VERSION, principals[index], memberships, 3, 0};
+    ZiStatus status = verify_private_token(&token, index == 0);
+    if (ZiFailed(status)) {
+      return status;
+    }
+  }
+  return ZI_STATUS_SUCCESS;
 }
 
 static ZiStatus verify_zifs_file_read(void) {

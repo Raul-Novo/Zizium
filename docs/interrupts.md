@@ -1,6 +1,6 @@
 # x64 CPU ownership, exceptions, and interrupts
 
-## Implemented in the current Seed slice
+## Implemented
 
 Zizium replaces the loader's execution tables before consuming the general
 boot context. The bootstrap entry disables interrupts, enables the mandatory
@@ -21,7 +21,7 @@ The 104-byte TSS has `RSP0` and three interrupt-stack-table entries. IST1 is
 assigned to double fault, IST2 to non-maskable interrupt, and IST3 to machine
 check. Static 32 KiB arrays provide only the pre-VMM emergency state. Once the
 owned page tables are active, RSP0 uses a guarded 64 KiB boot stack and each IST
-uses a separately owned guarded 32 KiB stack. The active Seed user thread
+uses a separately owned guarded 32 KiB stack. The active initial user thread
 updates RSP0 to its guarded 64 KiB kernel stack and restores the earlier value
 before teardown.
 
@@ -55,7 +55,7 @@ perform a kernel-thread context switch.
 Each live thread owns a 16-byte-aligned 512-byte `FXSAVE` area. The interrupt
 boundary saves the interrupted floating-point/SIMD state before calling C and
 restores the selected thread's state before return. This is sufficient for the
-current homogeneous scheduled ring-zero threads. Seed user processes run
+current homogeneous scheduled ring-zero threads. User processes run
 synchronously, one at a time, before the APIC timer is enabled and are not yet
 schedulable user threads. This is not an extended-state policy for AVX,
 protection keys,
@@ -77,7 +77,7 @@ data, a separate guard classification for the third case, and `PANIC`, while
 never reaching Luma or the recursive-exception marker.
 
 The user case takes a different containment path. A Ring-3 exception owned by
-the active Seed process marks that process terminating, changes the
+the active initial process marks that process terminating, changes the
 interrupt frame to a private assembly sentinel, and returns directly to a
 trusted kernel continuation. It restores kernel CR3/RSP, reclaims the user
 address space, emits `USER_FAULT_CONTAINED` and `USER_PROCESS_CLEAN`, then
@@ -123,7 +123,7 @@ prompt.
 ## Future
 
 Dispatcher waits, explicit timeout expiry, and waitable timers now exist.
-Phase 5 added bounded I/O request expiry and a polling NVMe timeout path, but it
+Hardware and storage added bounded I/O request expiry and a polling NVMe timeout path, but it
 does not claim controller-interrupt completion. Later process work needs
 scheduled user threads and recoverable user exception delivery. Hardware
 phases must add ACPI interrupt topology, per-CPU TSS and interrupt state,

@@ -5,7 +5,7 @@ Localisation data is separate from internal identifiers and must support
 language packs, timezone data, locale date/time and number formatting, keyboard
 layouts, decimal separators, calendars, and later right-to-left text and IMEs.
 
-## Implemented in Seed
+## Implemented
 
 UTF-8 validation, scalar conversion, Unicode terminal storage, and a generated
 Unicode 17.0.0 property foundation exist. The source spelling check enforces a

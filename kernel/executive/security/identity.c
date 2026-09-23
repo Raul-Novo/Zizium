@@ -100,8 +100,8 @@ ZiStatus zi_identity_reserve(const ZiIdentityIssuerState* state,
                              uint32_t authority,
                              ZiIdentityIssuerState* out_state,
                              ZiNativeIdentity* out_identity) {
-  if (out_state == NULL || out_identity == NULL ||
-      ZiFailed(zi_identity_issuer_validate(state)) || !authority_is_dynamic(authority)) {
+  if (out_state == NULL || out_identity == NULL || ZiFailed(zi_identity_issuer_validate(state)) ||
+      !authority_is_dynamic(authority)) {
     return ZI_STATUS_INVALID_ARGUMENT;
   }
   ZiIdentityIssuerState candidate = *state;
@@ -136,6 +136,7 @@ static bool issuer_is_valid(const unsigned char* issuer) {
 }
 
 static bool authority_is_dynamic(uint32_t authority) {
-  return (bool)(authority == ZI_SECURITY_AUTHORITY_GROUP || authority == ZI_SECURITY_AUTHORITY_USER ||
+  return (bool)(authority == ZI_SECURITY_AUTHORITY_GROUP ||
+                authority == ZI_SECURITY_AUTHORITY_USER ||
                 authority == ZI_SECURITY_AUTHORITY_SERVICE);
 }

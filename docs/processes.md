@@ -2,7 +2,7 @@
 
 ## Scope
 
-Seed implements a bounded, synchronously executed early process manager to
+Zizium implements a bounded, synchronously executed early process manager to
 prove the x64 privilege boundary and native programme start-up contract end to
 end. It is intentionally smaller than the future executive process manager,
 but it uses the permanent address-space, image, syscall, token, parameter,
@@ -78,7 +78,7 @@ exit status. The kernel-internal wait remains a zero-timeout poll. The public
 child wait adds synchronous nested execution for non-zero timeouts; it is not
 a scheduler-blocking wait and does not provide concurrent process execution.
 
-Before Ring-3 execution, the Phase 4 acceptance slice uses two of the distinct
+Before Ring-3 execution, the executive acceptance slice uses two of the distinct
 process records, their separately owned tokens, and their real handle tables
 to exchange a bounded channel message and transfer a read-only shared-section
 handle. It also arms ordinary handles which process release must close. The

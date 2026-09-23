@@ -1,6 +1,19 @@
 # Boot architecture
 
-## Implemented in Seed
+## Implemented
+
+New images provision SYSTEM:1-only security-directory metadata. Boot requires
+all eight rights to be granted to SYSTEM:1 and denied to USER:21, SERVICE:1
+and SYSTEM:2 even with Administrators/Users/Guests memberships. A missing child
+returns NotFound only to SYSTEM:1; denied principals receive AccessDenied
+before directory traversal, with unchanged output. This emits
+`ZIFS_PRIVATE_SECURITY`; no database, password or account is created.
+Old disposable images must be rebuilt. No implicit ACL migration is performed.
+
+The identity database/store is validated by host tests and six dedicated native
+NVMe boots. Only an explicit test option opens the disposable fixture database;
+normal boot neither provisions nor opens it. Existing service and session tokens
+remain bootstrap fixtures, not authenticated identities.
 
 The verified path is:
 
@@ -86,7 +99,7 @@ The normal smoke test requires `ENTRY`, `SERIAL`, `CPU_TABLES`,
 `MEMORY_STRESS`, `FRAMEBUFFER` or `FRAMEBUFFER_FALLBACK`, `IO_MANAGER`,
 `DMA_READY`, `ACPI_READY`, `PCIE_ENUMERATED`, `PCI_DEVICES`, `NVME_READY`,
 `GPT_ZIFS`, `ZIFS_PARTITION`, `STORAGE_READ_STRESS`, `ZIFS_DIRECT`, `ZIFS_MOUNT`,
-`ZIFS_SECURITY`, `CASE_SENSITIVE`, `ZIFS_FILE_READ`, `SERVICE_MANIFESTS`,
+`ZIFS_SECURITY`, `ZIFS_PRIVATE_SECURITY`, `CASE_SENSITIVE`, `ZIFS_FILE_READ`, `SERVICE_MANIFESTS`,
 `SERVICE_DEPENDENCIES`, `FILESYSTEM_PE_SOURCE`, `USER_ADDRESS_SPACE`, `USER_PE_LOADED`,
 `USER_PE_RELOCATED`, `USER_IMPORTS_RESOLVED`, `USER_PARAMETERS`,
 `USER_TOKEN_BOUND`, `USER_PROCESS_SET`, `SYSCALL_READY`, `RING3_ENTER`,
